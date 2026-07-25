@@ -167,6 +167,24 @@ body {
 .advanced summary::-webkit-details-marker { display: none; }
 .advanced[open] summary { margin-bottom: 10px; color: var(--accent); }
 .btn.xs { padding: 4px 8px; font-size: 0.72rem; }
+
+/* Incoming chat invite */
+.invite-card { text-align: center; }
+.invite-pulse {
+  font-size: 2.6rem; margin-bottom: 8px;
+  animation: invite-bounce 1s ease-in-out infinite;
+}
+@keyframes invite-bounce {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.12); }
+}
+.invite-msg {
+  margin: 10px 0 16px; padding: 12px; border-radius: 12px;
+  background: rgba(0,0,0,0.3); border: 1px solid var(--glass-border);
+  font-size: 0.95rem; color: var(--text); word-break: break-word;
+}
+.invite-actions { margin-top: 8px; gap: 12px; }
+.invite-actions .btn.primary { min-width: 140px; }
 .nearby-item .st-online { color: var(--ok); }
 .nearby-item .st-room { color: var(--accent); }
 .nearby-item.me-item { opacity: 0.75; border-style: dashed; }

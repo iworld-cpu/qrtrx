@@ -80,6 +80,12 @@
     homePeopleList: $('#homePeopleList'),
     homePeopleCount: $('#homePeopleCount'),
     presenceHint: $('#presenceHint'),
+    inviteModal: $('#inviteModal'),
+    inviteTitle: $('#inviteTitle'),
+    inviteSub: $('#inviteSub'),
+    inviteMsg: $('#inviteMsg'),
+    btnInviteAccept: $('#btnInviteAccept'),
+    btnInviteDecline: $('#btnInviteDecline'),
   };
 
   const state = {
@@ -103,6 +109,9 @@
     camRaf: 0,
     scanLock: false,
     mqttReady: false,
+    pendingInvite: null,
+    inviteRing: null,
+    seenInviteKeys: new Set(),
   };
 
   function getPresenceId() {
@@ -247,7 +256,13 @@
     saveName(name);
     if (el.nameInput) el.nameInput.value = name;
     if (el.meNameLabel) el.meNameLabel.textContent = name;
-    ensureMqtt();
+    ensureMqtt(() => {
+      // subscribe username channel after name known
+      try {
+        const uname = name.toLowerCase().replace(/\s+/g, '_').slice(0, 32);
+        state.mqtt?.subscribe?.(PRESENCE_TOPIC + '/user/' + uname, { qos: 0 });
+      } catch {}
+    });
     publishPresence(true);
     startPresenceLoop();
     showJoin();
@@ -641,6 +656,30 @@
     broadcast(payload);
     addChat({ name: state.name, text, me: true });
     el.chatInput.value = '';
+    // Also MQTT so receiver gets it even if PeerJS lag
+    mqttRelayChat(text);
+  }
+
+  function mqttRelayChat(text, toName) {
+    if (!text) return;
+    const fromName = state.name || loadName() || 'Someone';
+    ensureMqtt(() => {
+      if (!state.mqtt || !state.mqttReady) return;
+      try {
+        state.mqtt.publish(PRESENCE_TOPIC, JSON.stringify({
+          t: 'chat-relay',
+          fromName,
+          fromId: getPresenceId(),
+          toName: toName || '',
+          room: state.room || '',
+          text: String(text).slice(0, 4000),
+          broadcast: !toName,
+          ts: Date.now()
+        }), { qos: 0 });
+      } catch (e) {
+        console.warn(e);
+      }
+    });
   }
 
   // ── Bootstrap peer ─────────────────────────────────────
@@ -1092,7 +1131,7 @@
     }
   }
 
-  function connectToUser(toId, toName) {
+  function connectToUser(toId, toName, firstMessage) {
     const myName = (state.name || loadName() || el.nameInput?.value || '').trim();
     if (!myName) {
       showRegister();
@@ -1105,41 +1144,180 @@
     if (el.nameInput) el.nameInput.value = myName;
 
     const payload = {
-      t: 'invite',
+      t: 'chat-request',
       to: toId,
+      toName: toName || '',
       room,
       fromId: getPresenceId(),
       fromName: myName,
+      message: firstMessage || '',
       ts: Date.now()
     };
 
+    // Publish multiple ways so other device always opens
     ensureMqtt(() => {
       try {
-        state.mqtt.publish(`${PRESENCE_TOPIC}/invite/${toId}`, JSON.stringify(payload), { qos: 0 });
+        if (toId) {
+          state.mqtt.publish(`${PRESENCE_TOPIC}/invite/${toId}`, JSON.stringify(payload), { qos: 0 });
+        }
+        // by username topic
+        const uname = String(toName || '').trim().toLowerCase().replace(/\s+/g, '_').slice(0, 32);
+        if (uname) {
+          state.mqtt.publish(`${PRESENCE_TOPIC}/user/${uname}`, JSON.stringify(payload), { qos: 0 });
+        }
         state.mqtt.publish(PRESENCE_TOPIC, JSON.stringify({ ...payload, t: 'invite-broadcast' }), { qos: 0 });
+        // first message relay
+        if (firstMessage) {
+          state.mqtt.publish(PRESENCE_TOPIC, JSON.stringify({
+            t: 'chat-relay',
+            fromName: myName,
+            fromId: getPresenceId(),
+            toName,
+            room,
+            text: firstMessage,
+            ts: Date.now()
+          }), { qos: 0 });
+        }
       } catch (e) {
         console.warn(e);
       }
     });
 
-    toast(`Connecting to ${toName}…`, 'ok');
+    toast(`${toName}-ku chat open…`, 'ok');
     closeNearby();
-    // Join as host if free, else client
+
+    const go = () => {
+      enterRoom(myName, room);
+      // After join, if first message queued
+      if (firstMessage) {
+        setTimeout(() => {
+          if (el.chatInput) {
+            el.chatInput.value = firstMessage;
+            sendChat();
+          }
+        }, 1200);
+      }
+    };
+
     if (state.peer && state.room === room) {
-      toast(`Already chatting`, 'ok');
+      toast('Already in chat', 'ok');
       return;
     }
     if (state.peer && state.room && state.room !== room) {
       leave();
-      setTimeout(() => enterRoom(myName, room), 350);
+      setTimeout(go, 400);
     } else {
-      enterRoom(myName, room);
+      go();
     }
   }
 
-  // back-compat name
   function invitePerson(toId, toName) {
     connectToUser(toId, toName);
+  }
+
+  function showIncomingChat(data) {
+    if (!data?.room) return;
+    const key = `${data.fromId || ''}|${data.room}|${data.ts || 0}`;
+    if (state.seenInviteKeys.has(key)) return;
+    state.seenInviteKeys.add(key);
+    // keep set small
+    if (state.seenInviteKeys.size > 40) {
+      state.seenInviteKeys = new Set([...state.seenInviteKeys].slice(-20));
+    }
+
+    // Already in that room? ignore
+    if (state.room && String(state.room).toUpperCase() === String(data.room).toUpperCase()) {
+      return;
+    }
+
+    state.pendingInvite = data;
+    const who = data.fromName || 'Someone';
+    if (el.inviteTitle) el.inviteTitle.textContent = 'Chat request';
+    if (el.inviteSub) el.inviteSub.textContent = `${who} wants to chat with you`;
+    if (el.inviteMsg) {
+      if (data.message) {
+        el.inviteMsg.textContent = `"${data.message}"`;
+        el.inviteMsg.classList.remove('hidden');
+      } else {
+        el.inviteMsg.textContent = '';
+        el.inviteMsg.classList.add('hidden');
+      }
+    }
+    el.inviteModal?.classList.remove('hidden');
+    toast(`${who} chat open panran — Join click pannunga`, 'ok');
+    try { navigator.vibrate?.([120, 60, 120, 60, 200]); } catch {}
+    // ring tone via WebAudio beep
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.frequency.value = 880;
+      g.gain.value = 0.04;
+      o.start();
+      setTimeout(() => { try { o.stop(); ctx.close(); } catch {} }, 180);
+    } catch {}
+  }
+
+  function acceptInvite() {
+    const data = state.pendingInvite;
+    hideInviteModal();
+    if (!data?.room) return;
+    const myName = (state.name || loadName() || '').trim();
+    if (!myName) {
+      showRegister();
+      toast('Username register panni malli Join', 'err');
+      // keep room for after register
+      if (el.roomInput) el.roomInput.value = data.room;
+      return;
+    }
+    if (el.roomInput) el.roomInput.value = data.room;
+    if (el.nameInput) el.nameInput.value = myName;
+    toast(`${data.fromName || 'Chat'}-oda joining…`, 'ok');
+    if (state.peer && state.room && state.room !== data.room) {
+      leave();
+      setTimeout(() => enterRoom(myName, data.room), 400);
+    } else if (state.room === data.room) {
+      showRoom();
+    } else {
+      enterRoom(myName, data.room);
+    }
+  }
+
+  function declineInvite() {
+    const data = state.pendingInvite;
+    hideInviteModal();
+    if (data?.fromId) {
+      ensureMqtt(() => {
+        try {
+          state.mqtt.publish(PRESENCE_TOPIC, JSON.stringify({
+            t: 'invite-declined',
+            to: data.fromId,
+            fromName: state.name || loadName() || 'User',
+            ts: Date.now()
+          }), { qos: 0 });
+        } catch {}
+      });
+    }
+    state.pendingInvite = null;
+    toast('Declined', '');
+  }
+
+  function hideInviteModal() {
+    el.inviteModal?.classList.add('hidden');
+    state.pendingInvite = null;
+  }
+
+  function isInviteForMe(data) {
+    if (!data) return false;
+    const myId = getPresenceId();
+    const myName = (state.name || loadName() || '').trim().toLowerCase();
+    if (data.to && data.to === myId) return true;
+    if (data.toName && myName) {
+      const t = String(data.toName).trim().toLowerCase();
+      if (t === myName || myName.includes(t) || t.includes(myName)) return true;
+    }
+    return false;
   }
 
   function presencePayload() {
@@ -1279,6 +1457,12 @@
           try {
             client.subscribe(PRESENCE_TOPIC, { qos: 0 });
             client.subscribe(PRESENCE_TOPIC + '/invite/' + pid, { qos: 0 });
+            // username channel so invites open by name even if peer id differs
+            const uname = String(state.name || loadName() || '')
+              .trim().toLowerCase().replace(/\s+/g, '_').slice(0, 32);
+            if (uname) {
+              client.subscribe(PRESENCE_TOPIC + '/user/' + uname, { qos: 0 });
+            }
           } catch (e) {
             console.warn(e);
           }
@@ -1337,50 +1521,59 @@
     if (!data || typeof data !== 'object') return;
 
     if (data.t === 'presence' && data.id) {
-      // clock-skew tolerant (5 min)
       if (data.ts && Math.abs(Date.now() - data.ts) > 5 * 60 * 1000) return;
       upsertPerson(data);
       renderNearbyList();
       return;
     }
 
-    // Direct invite to me
-    if (data.t === 'invite' && data.to === getPresenceId() && data.room) {
-      toast(`${data.fromName || 'Someone'} invited you → ${data.room}`, 'ok');
-      el.roomInput.value = data.room;
-      if (el.nearbyRoomInput) el.nearbyRoomInput.value = data.room;
-      // Auto-join after short delay if we have a name
-      if ((el.nameInput.value || loadName() || '').trim()) {
-        setTimeout(() => joinRoomCode(data.room), 600);
-      } else {
-        openNearby();
-        el.nameInput?.focus();
-      }
+    // Chat request / invite → open Join popup for receiver
+    if (
+      (data.t === 'chat-request' || data.t === 'invite' || data.t === 'invite-broadcast') &&
+      data.room &&
+      data.fromId !== getPresenceId() &&
+      isInviteForMe(data)
+    ) {
+      showIncomingChat(data);
       return;
     }
 
-    if (data.t === 'invite-broadcast' && data.to === getPresenceId() && data.room) {
-      onMqttMessage(topic, { ...data, t: 'invite' });
+    if (data.t === 'invite-declined' && data.to === getPresenceId()) {
+      toast(`${data.fromName || 'User'} declined chat`, 'err');
+      return;
     }
 
-    // MQTT chat relay (works even when PeerJS mesh is flaky)
+    // MQTT chat relay
     if (data.t === 'chat-relay' && data.text) {
-      const myName = (state.name || el.nameInput?.value || '').trim().toLowerCase();
+      const myName = (state.name || loadName() || el.nameInput?.value || '').trim().toLowerCase();
       const to = String(data.toName || '').trim().toLowerCase();
       const from = String(data.fromName || 'Someone');
       const sameRoom = !!(state.room && data.room && String(state.room).toUpperCase() === String(data.room).toUpperCase());
       const toMe = !!(to && myName && (myName === to || myName.includes(to) || to.includes(myName)));
-      const toAll = !to || data.broadcast === true;
       if (data.fromId && data.fromId === getPresenceId()) return;
-      if (sameRoom || toMe || (toAll && sameRoom)) {
-        // If on join screen, still toast
+
+      if (sameRoom) {
         if (el.viewRoom?.classList.contains('active')) {
           addChat({ name: from, text: String(data.text).slice(0, 4000), me: false });
         }
-        toast(`${from}: ${String(data.text).slice(0, 80)}`, 'ok', 4000);
+        toast(`${from}: ${String(data.text).slice(0, 80)}`, 'ok');
         try { navigator.vibrate?.(80); } catch {}
+        return;
+      }
+
+      // Not in room yet but message for me → open join popup with message
+      if (toMe && data.room) {
+        showIncomingChat({
+          t: 'chat-request',
+          fromId: data.fromId,
+          fromName: from,
+          toName: data.toName,
+          room: data.room,
+          message: data.text,
+          ts: data.ts || Date.now()
+        });
       } else if (toMe) {
-        toast(`${from}: ${String(data.text).slice(0, 100)}`, 'ok', 5000);
+        toast(`${from}: ${String(data.text).slice(0, 100)}`, 'ok');
       }
     }
   }
@@ -1609,6 +1802,9 @@
       renderNearbyList();
       toast('Refreshed', 'ok');
     });
+
+    el.btnInviteAccept?.addEventListener('click', acceptInvite);
+    el.btnInviteDecline?.addEventListener('click', declineInvite);
 
     el.btnRandomRoom?.addEventListener('click', () => {
       el.roomInput.value = randomRoom();
