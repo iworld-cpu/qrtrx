@@ -2101,6 +2101,12 @@
       state.pendingFiles.push(f);
     }
     renderQueue();
+    // Auto-send to everyone in room/group (simpler UX)
+    if (state.pendingFiles.length && state.room) {
+      setTimeout(() => {
+        if (el.btnSendFiles && !el.btnSendFiles.disabled) el.btnSendFiles.click();
+      }, 200);
+    }
   }
 
   function bind() {
