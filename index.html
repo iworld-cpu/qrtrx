@@ -3,16 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
-  <meta name="theme-color" content="#0a0f1a" />
-  <meta name="description" content="HiveDrop — free local-network chat & file share. Open the site, scan QR, message & transfer. Host on GitHub Pages." />
+  <meta name="theme-color" content="#0b141a" />
+  <meta name="description" content="HiveDrop — username chat, groups, files, seen ticks. Free on GitHub Pages." />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <title>HiveDrop · LAN Chat & Files</title>
+  <title>HiveDrop · Chat · Groups · Files</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/style.css" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css?v=9" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⬡</text></svg>" />
-  <!-- PWA-ish -->
   <link rel="manifest" href="manifest.webmanifest" />
 </head>
 <body>
@@ -22,7 +21,7 @@
   <div class="grid"></div>
 
   <div id="app">
-    <!-- REGISTER (username only) -->
+    <!-- REGISTER -->
     <section id="view-register" class="view active">
       <div class="card join-card">
         <div class="logo">
@@ -30,20 +29,17 @@
           <h1>HiveDrop</h1>
         </div>
         <p class="tagline">
-          <strong>Username</strong> register pannunga.<br />
-          Nearby-la irukura users automatic show aagum — click → chat + files.
+          Username register · Nearby users · <strong>Groups</strong><br />
+          Chat · files · ✓✓ seen ticks
         </p>
-
         <label class="lbl" for="regNameInput">Username</label>
         <input id="regNameInput" class="inp" maxlength="24" placeholder="e.g. iworld arun" autocomplete="nickname" />
-        <button type="button" id="btnRegister" class="btn primary block">
-          Continue <span>→</span>
-        </button>
-        <p class="fine">No password · No install · Free website</p>
+        <button type="button" id="btnRegister" class="btn primary block">Continue →</button>
+        <p class="fine">No password · Free · Works on phone &amp; PC</p>
       </div>
     </section>
 
-    <!-- HOME: nearby users only -->
+    <!-- HOME -->
     <section id="view-join" class="view">
       <div class="card join-card home-card">
         <div class="home-top">
@@ -60,22 +56,46 @@
           <span id="presenceHint" class="presence-hint inline">Connecting…</span>
         </div>
 
-        <div id="homePeople" class="home-people big">
-          <div class="home-people-h">
-            <span>Nearby users</span>
-            <div class="home-people-actions">
-              <button type="button" id="btnRefreshHome" class="btn ghost xs">Refresh</button>
-              <span id="homePeopleCount" class="count">0</span>
-            </div>
-          </div>
-          <ul id="homePeopleList" class="home-people-list">
-            <li class="nearby-empty">Waiting for users…</li>
-          </ul>
+        <div class="home-tabs">
+          <button type="button" class="home-tab active" data-home-tab="users">👤 Users</button>
+          <button type="button" class="home-tab" data-home-tab="groups">👥 Groups</button>
         </div>
 
-        <p class="hint-sm center">Tap a user → chat &amp; file share opens</p>
+        <!-- USERS -->
+        <div id="paneUsers" class="home-pane active">
+          <div id="homePeople" class="home-people big">
+            <div class="home-people-h">
+              <span>Nearby users</span>
+              <div class="home-people-actions">
+                <button type="button" id="btnRefreshHome" class="btn ghost xs">Refresh</button>
+                <span id="homePeopleCount" class="count">0</span>
+              </div>
+            </div>
+            <ul id="homePeopleList" class="home-people-list">
+              <li class="nearby-empty">Waiting for users…</li>
+            </ul>
+          </div>
+          <p class="hint-sm center">Tap user → 1:1 chat + files</p>
+        </div>
 
-        <!-- advanced: hidden room tools -->
+        <!-- GROUPS -->
+        <div id="paneGroups" class="home-pane">
+          <div class="group-actions">
+            <button type="button" id="btnCreateGroup" class="btn primary flex1">＋ Create group</button>
+            <button type="button" id="btnJoinGroup" class="btn secondary flex1">Join group</button>
+          </div>
+          <div class="home-people big">
+            <div class="home-people-h">
+              <span>Your groups</span>
+              <span id="groupCount" class="count">0</span>
+            </div>
+            <ul id="groupList" class="home-people-list">
+              <li class="nearby-empty">No groups yet.<br/>Create or join with a code</li>
+            </ul>
+          </div>
+          <p class="hint-sm center">Group members chat + download files together</p>
+        </div>
+
         <details class="advanced">
           <summary>Advanced (room code / QR)</summary>
           <label class="lbl" for="nameInput">Username</label>
@@ -83,7 +103,7 @@
           <label class="lbl" for="roomInput">Room code</label>
           <div class="row">
             <input id="roomInput" class="inp mono" maxlength="8" placeholder="AUTO" spellcheck="false" />
-            <button type="button" id="btnRandomRoom" class="btn ghost" title="New code">↻</button>
+            <button type="button" id="btnRandomRoom" class="btn ghost">↻</button>
           </div>
           <button type="button" id="btnJoin" class="btn secondary block">Enter room code</button>
           <button type="button" id="btnNearby" class="btn ghost block nearby-btn">📷 Scan QR</button>
@@ -91,68 +111,88 @@
       </div>
     </section>
 
-    <!-- ROOM -->
-    <section id="view-room" class="view">
-      <header class="bar">
-        <div class="bar-left">
-          <span class="logo-sm">⬡</span>
-          <strong>HiveDrop</strong>
-          <span id="roomBadge" class="badge mono">————</span>
-          <span id="roleBadge" class="badge soft">…</span>
+    <!-- CHAT ROOM (1:1 or group) -->
+    <section id="view-room" class="view chat-view">
+      <header class="chat-bar">
+        <button type="button" id="btnLeave" class="btn icon back-btn" title="Back">←</button>
+        <div class="chat-bar-info">
+          <div class="chat-title" id="chatTitle">Chat</div>
+          <div class="chat-sub" id="chatSub">connecting…</div>
         </div>
-        <div class="bar-right">
-          <button type="button" id="btnNearbyInRoom" class="btn ghost sm" title="Nearby">📡 Nearby</button>
-          <button type="button" id="btnQr" class="btn icon" title="QR code">QR</button>
+        <div class="chat-bar-actions">
+          <button type="button" id="btnQr" class="btn icon" title="QR / invite">QR</button>
           <button type="button" id="btnCopy" class="btn icon" title="Copy link">⧉</button>
-          <button type="button" id="btnLeave" class="btn ghost sm">Leave</button>
+          <button type="button" id="btnMembers" class="btn icon" title="Members">👥</button>
         </div>
+        <!-- hidden legacy badges for JS -->
+        <span id="roomBadge" class="hidden">————</span>
+        <span id="roleBadge" class="hidden">…</span>
+        <button type="button" id="btnNearbyInRoom" class="hidden">Nearby</button>
       </header>
 
-      <div class="room-grid">
-        <!-- Peers -->
-        <aside class="panel peers-panel">
+      <div class="chat-body">
+        <aside class="members-drawer" id="membersDrawer">
           <div class="panel-h">
-            <h2>Online</h2>
+            <h2>Members</h2>
             <span id="peerCount" class="count">0</span>
           </div>
           <ul id="peerList" class="peer-list"></ul>
           <p id="youLine" class="you-line">You</p>
+          <button type="button" id="btnCloseMembers" class="btn ghost sm block">Close</button>
         </aside>
 
-        <!-- Chat -->
-        <main class="panel chat-panel">
-          <div id="chatLog" class="chat-log" aria-live="polite"></div>
-          <div class="composer">
-            <input id="chatInput" class="inp" type="text" placeholder="Message the hive…" maxlength="4000" autocomplete="off" />
-            <button type="button" id="btnSendChat" class="btn primary">Send</button>
+        <main class="chat-main">
+          <div id="chatLog" class="chat-log wa" aria-live="polite"></div>
+
+          <div class="file-strip" id="fileStrip">
+            <div id="dropZone" class="drop mini" tabindex="0">
+              <span>📎 Attach / drop files</span>
+              <input type="file" id="fileInput" multiple hidden />
+            </div>
+            <div id="fileQueue" class="file-queue"></div>
+            <div id="transferList" class="transfer-list"></div>
+            <div class="send-row hidden">
+              <select id="sendTarget" class="inp select"><option value="*">Everyone</option></select>
+              <button type="button" id="btnSendFiles" class="btn secondary" disabled>Send files</button>
+            </div>
+            <p id="sendTargetHint" class="hidden"></p>
+          </div>
+
+          <div class="composer wa">
+            <input id="chatInput" class="inp" type="text" placeholder="Type a message" maxlength="4000" autocomplete="off" />
+            <button type="button" id="btnSendChat" class="btn primary send-fab" title="Send">➤</button>
           </div>
         </main>
-
-        <!-- Files -->
-        <aside class="panel files-panel">
-          <div class="panel-h">
-            <h2>Files</h2>
-          </div>
-          <div id="dropZone" class="drop" tabindex="0">
-            <div>
-              <div class="drop-ico">⬆</div>
-              <strong>Drop files</strong>
-              <p>or tap to choose</p>
-            </div>
-            <input type="file" id="fileInput" multiple hidden />
-          </div>
-          <p id="sendTargetHint" class="hint-sm">Select a person (or All) then send</p>
-          <div class="send-row">
-            <select id="sendTarget" class="inp select">
-              <option value="*">Everyone</option>
-            </select>
-            <button type="button" id="btnSendFiles" class="btn secondary" disabled>Send files</button>
-          </div>
-          <div id="fileQueue" class="file-queue"></div>
-          <div id="transferList" class="transfer-list"></div>
-        </aside>
       </div>
     </section>
+  </div>
+
+  <!-- Create group -->
+  <div id="createGroupModal" class="modal hidden">
+    <div class="modal-bg" data-close-cg></div>
+    <div class="modal-card">
+      <button type="button" class="x" data-close-cg>×</button>
+      <h2>Create group</h2>
+      <p class="sub">Name podunga · code share pannunga</p>
+      <label class="lbl" for="newGroupName">Group name</label>
+      <input id="newGroupName" class="inp" maxlength="32" placeholder="e.g. iWorld Team" />
+      <button type="button" id="btnDoCreateGroup" class="btn primary block">Create &amp; open</button>
+    </div>
+  </div>
+
+  <!-- Join group -->
+  <div id="joinGroupModal" class="modal hidden">
+    <div class="modal-bg" data-close-jg></div>
+    <div class="modal-card">
+      <button type="button" class="x" data-close-jg>×</button>
+      <h2>Join group</h2>
+      <p class="sub">Group code enter pannunga</p>
+      <label class="lbl" for="joinGroupCode">Group code</label>
+      <input id="joinGroupCode" class="inp mono" maxlength="8" placeholder="e.g. AB12CD" spellcheck="false" />
+      <label class="lbl" for="joinGroupName">Group name (optional)</label>
+      <input id="joinGroupName" class="inp" maxlength="32" placeholder="Display name" />
+      <button type="button" id="btnDoJoinGroup" class="btn primary block">Join group →</button>
+    </div>
   </div>
 
   <!-- Incoming chat invite -->
@@ -170,15 +210,15 @@
     </div>
   </div>
 
-  <!-- QR share Modal -->
+  <!-- QR -->
   <div id="qrModal" class="modal hidden">
     <div class="modal-bg" data-close></div>
     <div class="modal-card">
-      <button type="button" class="x" data-close aria-label="Close">×</button>
-      <h2>Scan to join</h2>
-      <p class="sub">Phone camera or Nearby scan → point here</p>
-      <div id="qrBox" class="qr-box" aria-label="Room QR code"></div>
-      <img id="qrImg" class="qr-img hidden" alt="Room QR code" width="260" height="260" />
+      <button type="button" class="x" data-close>×</button>
+      <h2 id="qrModalTitle">Invite / join</h2>
+      <p class="sub">Scan or share code</p>
+      <div id="qrBox" class="qr-box"></div>
+      <img id="qrImg" class="qr-img hidden" alt="QR" width="260" height="260" />
       <p id="joinUrl" class="join-url mono"></p>
       <p id="qrRoomBig" class="qr-room-big mono"></p>
       <div class="modal-actions">
@@ -188,48 +228,38 @@
     </div>
   </div>
 
-  <!-- Nearby Scan Modal -->
+  <!-- Nearby (QR scan) -->
   <div id="nearbyModal" class="modal hidden">
     <div class="modal-bg" data-close-nearby></div>
     <div class="modal-card nearby-card">
-      <button type="button" class="x" data-close-nearby aria-label="Close">×</button>
-      <h2>📡 Nearby people</h2>
-      <p class="sub">Name type panna list-la varum · click → join</p>
-
+      <button type="button" class="x" data-close-nearby>×</button>
+      <h2>📡 Nearby / QR</h2>
       <div class="nearby-tabs">
         <button type="button" class="tab active" data-tab="live">🟢 People</button>
         <button type="button" class="tab" data-tab="camera">📷 Scan QR</button>
       </div>
-
       <div id="tabLive" class="tab-pane active">
         <div class="live-head">
-          <span id="nearbyStatus">Type your name to go online…</span>
+          <span id="nearbyStatus">…</span>
           <button type="button" id="btnRefreshNearby" class="btn ghost sm">Refresh</button>
         </div>
-        <ul id="nearbyList" class="nearby-list">
-          <li class="nearby-empty">No one yet.<br/>Both devices: open site → type name → wait 2 sec</li>
-        </ul>
+        <ul id="nearbyList" class="nearby-list"></ul>
         <div class="manual-room">
-          <input id="nearbyRoomInput" class="inp mono" maxlength="8" placeholder="Or type room code" />
+          <input id="nearbyRoomInput" class="inp mono" maxlength="8" placeholder="Room / group code" />
           <button type="button" id="btnNearbyJoinCode" class="btn primary">Join</button>
         </div>
-        <p class="hint-sm center">Same app + internet. Click a person in a room to join them.</p>
       </div>
-
       <div id="tabCamera" class="tab-pane">
         <div class="cam-wrap">
           <video id="camVideo" class="cam-video" playsinline muted autoplay></video>
           <canvas id="camCanvas" class="hidden"></canvas>
           <div id="camOverlay" class="cam-overlay">Camera off</div>
         </div>
-        <p id="camStatus" class="hint-sm center">Allow camera · point at host QR</p>
+        <p id="camStatus" class="hint-sm center">Point at QR</p>
         <div class="cam-actions">
           <button type="button" id="btnStartCam" class="btn secondary">Start camera</button>
           <button type="button" id="btnStopCam" class="btn ghost hidden">Stop</button>
-          <label class="btn ghost file-label">
-            Upload QR photo
-            <input type="file" id="qrFileInput" accept="image/*" capture="environment" hidden />
-          </label>
+          <label class="btn ghost file-label">Upload QR<input type="file" id="qrFileInput" accept="image/*" hidden /></label>
         </div>
       </div>
     </div>
@@ -238,11 +268,10 @@
   <div id="toasts" class="toasts"></div>
   <div id="statusDot" class="status-dot" title="Connection"></div>
 
-  <!-- libs: PeerJS + MQTT v4 (stable browser) + QR + jsQR -->
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
-  <script src="js/app.js?v=8"></script>
+  <script src="js/app.js?v=9"></script>
 </body>
 </html>

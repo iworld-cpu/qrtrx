@@ -112,7 +112,39 @@
     pendingInvite: null,
     inviteRing: null,
     seenInviteKeys: new Set(),
+    // groups + message receipts
+    groups: [], // { code, name, joinedAt }
+    isGroup: false,
+    groupName: '',
+    chatPartnerName: '',
+    msgStatus: new Map(), // mid -> 'sent'|'delivered'|'seen'
+    outgoingMids: new Map(), // mid -> { el, status }
   };
+
+  function loadGroups() {
+    try {
+      state.groups = JSON.parse(localStorage.getItem('hivedrop_groups') || '[]') || [];
+    } catch { state.groups = []; }
+    return state.groups;
+  }
+  function saveGroups() {
+    try { localStorage.setItem('hivedrop_groups', JSON.stringify(state.groups || [])); } catch {}
+  }
+  function upsertGroup(code, name) {
+    code = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+    if (!code) return null;
+    loadGroups();
+    const i = state.groups.findIndex((g) => g.code === code);
+    const g = { code, name: (name || code).slice(0, 32), joinedAt: Date.now() };
+    if (i >= 0) state.groups[i] = { ...state.groups[i], ...g, name: name || state.groups[i].name };
+    else state.groups.unshift(g);
+    saveGroups();
+    renderGroupList();
+    return g;
+  }
+  function groupTopic(code) {
+    return PRESENCE_TOPIC + '/group/' + String(code).toUpperCase();
+  }
 
   function getPresenceId() {
     if (state.presenceId) return state.presenceId;
@@ -279,23 +311,133 @@
     el.chatLog.scrollTop = el.chatLog.scrollHeight;
   }
 
-  function addChat({ name, text, me, file }) {
+  function ticksHtml(status) {
+    if (!status || status === 'sent') return '<span class="ticks" title="Sent">✓</span>';
+    if (status === 'delivered') return '<span class="ticks" title="Delivered">✓✓</span>';
+    return '<span class="ticks read" title="Seen">✓✓</span>';
+  }
+
+  function addChat({ name, text, me, file, mid, status }) {
     const d = document.createElement('div');
     d.className = `msg ${me ? 'me' : 'them'}${file ? ' file-msg' : ''}`;
-    if (file) {
-      d.innerHTML = `
-        <span class="who">${escapeHtml(name)}</span>
-        📎 <a href="${file.url}" download="${escapeHtml(file.name)}">${escapeHtml(file.name)}</a>
-        <span style="color:var(--dim);font-size:0.75rem"> (${fmtBytes(file.size)})</span>
-        <span class="time">${timeNow()}</span>`;
-    } else {
-      d.innerHTML = `
-        <span class="who">${escapeHtml(name)}</span>
-        ${escapeHtml(text)}
-        <span class="time">${timeNow()}</span>`;
-    }
+    if (mid) d.dataset.mid = mid;
+    const body = file
+      ? `📎 <a href="${file.url}" download="${escapeHtml(file.name)}">${escapeHtml(file.name)}</a>
+         <span style="opacity:.7;font-size:0.75rem"> (${fmtBytes(file.size)})</span>`
+      : escapeHtml(text || '');
+    const tick = me ? ticksHtml(status || 'sent') : '';
+    d.innerHTML = `
+      <span class="who">${escapeHtml(name || '')}</span>
+      <div class="body">${body}</div>
+      <div class="meta-line">
+        <span class="time">${timeNow()}</span>
+        ${tick}
+      </div>`;
     el.chatLog.appendChild(d);
     el.chatLog.scrollTop = el.chatLog.scrollHeight;
+    if (me && mid) {
+      state.outgoingMids.set(mid, { el: d, status: status || 'sent' });
+      state.msgStatus.set(mid, status || 'sent');
+    }
+    return d;
+  }
+
+  function updateMsgTicks(mid, status) {
+    if (!mid || !status) return;
+    const cur = state.msgStatus.get(mid);
+    const rank = { sent: 1, delivered: 2, seen: 3 };
+    if (cur && (rank[status] || 0) <= (rank[cur] || 0)) return;
+    state.msgStatus.set(mid, status);
+    const rec = state.outgoingMids.get(mid);
+    const node = rec?.el || el.chatLog?.querySelector(`.msg[data-mid="${mid}"]`);
+    if (!node) return;
+    const tickEl = node.querySelector('.ticks');
+    if (tickEl) {
+      tickEl.outerHTML = ticksHtml(status);
+    }
+    if (rec) rec.status = status;
+  }
+
+  function newMid() {
+    return 'm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7);
+  }
+
+  function renderGroupList() {
+    loadGroups();
+    const list = $('#groupList');
+    const count = $('#groupCount');
+    if (count) count.textContent = String(state.groups.length);
+    if (!list) return;
+    if (!state.groups.length) {
+      list.innerHTML = '<li class="nearby-empty">No groups yet.<br/>Create or join with a code</li>';
+      return;
+    }
+    list.innerHTML = state.groups.map((g) => `
+      <li class="nearby-item group-item" data-code="${escapeHtml(g.code)}" data-name="${escapeHtml(g.name)}">
+        <div class="av">👥</div>
+        <div class="meta">
+          <div class="nm">${escapeHtml(g.name)}</div>
+          <div class="rm mono">${escapeHtml(g.code)}</div>
+        </div>
+        <span class="join-chip">Open →</span>
+      </li>`).join('');
+    list.querySelectorAll('.group-item').forEach((item) => {
+      item.addEventListener('click', () => {
+        openGroup(item.dataset.code, item.dataset.name);
+      });
+    });
+  }
+
+  function openGroup(code, name) {
+    const myName = (state.name || loadName() || '').trim();
+    if (!myName) {
+      showRegister();
+      return;
+    }
+    code = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+    if (!code) return;
+    upsertGroup(code, name || code);
+    state.isGroup = true;
+    state.groupName = name || code;
+    state.chatPartnerName = '';
+    if (el.roomInput) el.roomInput.value = code;
+    if (el.nameInput) el.nameInput.value = myName;
+    enterRoom(myName, code);
+  }
+
+  function createGroup(name) {
+    name = String(name || '').trim().slice(0, 32);
+    if (!name) {
+      toast('Group name type pannunga', 'err');
+      return;
+    }
+    const code = randomRoom();
+    upsertGroup(code, name);
+    // announce group on MQTT for discovery
+    ensureMqtt(() => {
+      try {
+        state.mqtt.publish(PRESENCE_TOPIC, JSON.stringify({
+          t: 'group-announce',
+          code,
+          name,
+          fromId: getPresenceId(),
+          fromName: state.name || loadName(),
+          ts: Date.now()
+        }), { qos: 0 });
+      } catch {}
+    });
+    toast(`Group “${name}” created`, 'ok');
+    openGroup(code, name);
+  }
+
+  function joinGroupByCode(code, name) {
+    code = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+    if (code.length < 4) {
+      toast('Valid group code enter pannunga', 'err');
+      return;
+    }
+    upsertGroup(code, name || code);
+    openGroup(code, name || code);
   }
 
   function renderPeers() {
@@ -491,8 +633,27 @@
         break;
       }
       case 'chat': {
-        addChat({ name: data.name || 'Guest', text: data.text, me: false });
+        const mid = data.mid || '';
+        const d = addChat({
+          name: data.name || 'Guest',
+          text: data.text,
+          me: false,
+          mid
+        });
+        if (d && data.fromId) d.dataset.fromId = data.fromId;
+        // delivery ack
+        sendDeliveryAck(mid, data.fromId || fromId, 'delivered');
+        // seen if chat visible
+        if (document.visibilityState === 'visible' && el.viewRoom?.classList.contains('active')) {
+          setTimeout(() => sendDeliveryAck(mid, data.fromId || fromId, 'seen'), 300);
+        }
         try { navigator.vibrate?.(40); } catch {}
+        break;
+      }
+      case 'msg-ack': {
+        if (data.mid && (!data.to || data.to === getPresenceId() || data.to === state.id)) {
+          updateMsgTicks(data.mid, data.kind === 'seen' ? 'seen' : 'delivered');
+        }
         break;
       }
       case 'file-meta': {
@@ -652,15 +813,41 @@
   function sendChat() {
     const text = el.chatInput.value.trim();
     if (!text) return;
-    const payload = { t: 'chat', name: state.name, text, id: state.id };
+    const mid = newMid();
+    const fromName = state.name || loadName() || 'Someone';
+    const payload = {
+      t: 'chat',
+      mid,
+      name: fromName,
+      text,
+      id: state.id,
+      fromId: getPresenceId(),
+      room: state.room,
+      ts: Date.now()
+    };
     broadcast(payload);
-    addChat({ name: state.name, text, me: true });
+    addChat({ name: fromName, text, me: true, mid, status: 'sent' });
     el.chatInput.value = '';
-    // Also MQTT so receiver gets it even if PeerJS lag
-    mqttRelayChat(text);
+    mqttRelayChat(text, state.chatPartnerName || '', mid);
+    // group topic
+    if (state.isGroup && state.room) {
+      ensureMqtt(() => {
+        try {
+          state.mqtt.publish(groupTopic(state.room), JSON.stringify({
+            t: 'gchat',
+            mid,
+            fromId: getPresenceId(),
+            fromName,
+            text,
+            room: state.room,
+            ts: Date.now()
+          }), { qos: 0 });
+        } catch {}
+      });
+    }
   }
 
-  function mqttRelayChat(text, toName) {
+  function mqttRelayChat(text, toName, mid) {
     if (!text) return;
     const fromName = state.name || loadName() || 'Someone';
     ensureMqtt(() => {
@@ -668,6 +855,7 @@
       try {
         state.mqtt.publish(PRESENCE_TOPIC, JSON.stringify({
           t: 'chat-relay',
+          mid: mid || newMid(),
           fromName,
           fromId: getPresenceId(),
           toName: toName || '',
@@ -679,6 +867,42 @@
       } catch (e) {
         console.warn(e);
       }
+    });
+  }
+
+  function sendDeliveryAck(mid, fromId, kind) {
+    // kind: delivered | seen
+    if (!mid) return;
+    ensureMqtt(() => {
+      try {
+        state.mqtt.publish(PRESENCE_TOPIC, JSON.stringify({
+          t: 'msg-ack',
+          mid,
+          kind: kind || 'delivered',
+          to: fromId,
+          fromId: getPresenceId(),
+          room: state.room || '',
+          ts: Date.now()
+        }), { qos: 0 });
+      } catch {}
+    });
+    // also via peer mesh
+    broadcast({
+      t: 'msg-ack',
+      mid,
+      kind: kind || 'delivered',
+      to: fromId,
+      fromId: getPresenceId()
+    });
+  }
+
+  function markVisibleMessagesSeen() {
+    // When chat open, mark last incoming as seen
+    if (!el.viewRoom?.classList.contains('active')) return;
+    el.chatLog?.querySelectorAll('.msg.them[data-mid]').forEach((node) => {
+      const mid = node.dataset.mid;
+      const fromId = node.dataset.fromId;
+      if (mid) sendDeliveryAck(mid, fromId, 'seen');
     });
   }
 
@@ -854,37 +1078,85 @@
   }
 
   function onJoined() {
-    el.btnJoin.disabled = false;
-    el.btnJoin.innerHTML = 'Enter hive <span>→</span>';
-    el.roomBadge.textContent = state.room;
-    el.roleBadge.textContent = state.isHost ? 'HOST' : 'JOINED';
+    if (el.btnJoin) {
+      el.btnJoin.disabled = false;
+      el.btnJoin.textContent = 'Enter room code';
+    }
+    if (el.roomBadge) el.roomBadge.textContent = state.room;
+    if (el.roleBadge) el.roleBadge.textContent = state.isHost ? 'HOST' : 'JOINED';
+
+    // Header titles
+    const title = $('#chatTitle');
+    const sub = $('#chatSub');
+    if (state.isGroup) {
+      if (title) title.textContent = state.groupName || ('Group ' + state.room);
+      if (sub) sub.textContent = `Group · code ${state.room} · ${state.isHost ? 'admin' : 'member'}`;
+      if (state.room) upsertGroup(state.room, state.groupName || state.room);
+    } else if (state.chatPartnerName) {
+      if (title) title.textContent = state.chatPartnerName;
+      if (sub) sub.textContent = 'online · private chat';
+    } else {
+      if (title) title.textContent = 'Chat ' + state.room;
+      if (sub) sub.textContent = state.isHost ? 'Host · share QR to invite' : 'Connected';
+    }
+
     showRoom();
     renderPeers();
     renderQueue();
     el.chatLog.innerHTML = '';
-    addSystem(state.isHost
-      ? `Room ${state.room} created · show QR so others can join`
-      : `Joined room ${state.room}`);
+    state.outgoingMids.clear();
+    addSystem(state.isGroup
+      ? `Group “${state.groupName || state.room}” · members can chat & share files`
+      : (state.isHost ? `Chat ready · share QR / wait for join` : `Joined · say hi 👋`));
     setStatus('on');
-    toast(state.isHost ? 'You are host' : 'Connected', 'ok');
+    toast(state.isGroup ? 'Group open' : (state.isHost ? 'Chat open' : 'Joined'), 'ok');
 
-    // URL
     const u = new URL(location.href);
     u.searchParams.set('room', state.room);
+    if (state.isGroup) u.searchParams.set('group', '1');
+    if (state.groupName) u.searchParams.set('gname', state.groupName);
     history.replaceState(null, '', u);
 
-    // Show QR for host; everyone helps advertise room to nearby list
-    if (state.isHost) {
+    // Subscribe group MQTT channel
+    if (state.room) {
+      ensureMqtt(() => {
+        try {
+          state.mqtt.subscribe(groupTopic(state.room), { qos: 0 });
+          state.mqtt.publish(groupTopic(state.room), JSON.stringify({
+            t: 'gjoin',
+            fromId: getPresenceId(),
+            fromName: state.name,
+            room: state.room,
+            groupName: state.groupName || '',
+            ts: Date.now()
+          }), { qos: 0 });
+        } catch {}
+      });
+    }
+
+    if (state.isHost && !state.chatPartnerName) {
       setTimeout(() => openQr(), 400);
     }
     startAnnouncing();
+    setTimeout(markVisibleMessagesSeen, 500);
   }
 
   // ── QR (reliable multi-fallback) ───────────────────────
   function openQr() {
-    const url = joinUrl();
-    el.joinUrl.textContent = url;
+    const url = (() => {
+      const u = new URL(location.href);
+      u.search = '';
+      u.searchParams.set('room', state.room || '');
+      if (state.isGroup) {
+        u.searchParams.set('group', '1');
+        if (state.groupName) u.searchParams.set('gname', state.groupName);
+      }
+      return u.toString();
+    })();
+    if (el.joinUrl) el.joinUrl.textContent = url;
     if (el.qrRoomBig) el.qrRoomBig.textContent = state.room || '';
+    const qt = $('#qrModalTitle');
+    if (qt) qt.textContent = state.isGroup ? 'Group invite QR' : 'Scan to join';
     el.qrModal.classList.remove('hidden');
     renderQr(url);
   }
@@ -955,12 +1227,18 @@
     destroyPeer();
     state.room = '';
     state.isHost = false;
+    state.isGroup = false;
+    state.groupName = '';
+    state.chatPartnerName = '';
     publishPresence(true);
     const u = new URL(location.href);
     u.searchParams.delete('room');
+    u.searchParams.delete('group');
+    u.searchParams.delete('gname');
     history.replaceState(null, '', u.pathname + u.hash);
     showJoin();
-    toast('Left room');
+    renderGroupList();
+    toast('Back to home');
     updatePresenceHint();
   }
 
@@ -1185,6 +1463,9 @@
 
     toast(`${toName}-ku chat open…`, 'ok');
     closeNearby();
+    state.isGroup = false;
+    state.groupName = '';
+    state.chatPartnerName = toName;
 
     const go = () => {
       enterRoom(myName, room);
@@ -1543,6 +1824,43 @@
       return;
     }
 
+    // Message delivery / seen ticks
+    if (data.t === 'msg-ack' && data.mid) {
+      if (!data.to || data.to === getPresenceId()) {
+        updateMsgTicks(data.mid, data.kind === 'seen' ? 'seen' : 'delivered');
+      }
+      return;
+    }
+
+    // Group chat channel
+    if ((data.t === 'gchat' || data.t === 'gjoin') && data.room) {
+      if (state.room && String(state.room).toUpperCase() === String(data.room).toUpperCase()) {
+        if (data.t === 'gjoin' && data.fromId !== getPresenceId()) {
+          addSystem(`${data.fromName || 'Someone'} joined the group`);
+          return;
+        }
+        if (data.t === 'gchat' && data.fromId !== getPresenceId()) {
+          const d = addChat({
+            name: data.fromName || 'Member',
+            text: data.text,
+            me: false,
+            mid: data.mid
+          });
+          if (d && data.fromId) d.dataset.fromId = data.fromId;
+          sendDeliveryAck(data.mid, data.fromId, 'delivered');
+          if (document.visibilityState === 'visible') {
+            setTimeout(() => sendDeliveryAck(data.mid, data.fromId, 'seen'), 200);
+          }
+        }
+      }
+      return;
+    }
+
+    if (data.t === 'group-announce' && data.code) {
+      // optional: could show public groups — skip auto-join
+      return;
+    }
+
     // MQTT chat relay
     if (data.t === 'chat-relay' && data.text) {
       const myName = (state.name || loadName() || el.nameInput?.value || '').trim().toLowerCase();
@@ -1554,14 +1872,21 @@
 
       if (sameRoom) {
         if (el.viewRoom?.classList.contains('active')) {
-          addChat({ name: from, text: String(data.text).slice(0, 4000), me: false });
+          const d = addChat({
+            name: from,
+            text: String(data.text).slice(0, 4000),
+            me: false,
+            mid: data.mid
+          });
+          if (d && data.fromId) d.dataset.fromId = data.fromId;
+          sendDeliveryAck(data.mid, data.fromId, 'delivered');
+          if (document.visibilityState === 'visible') {
+            setTimeout(() => sendDeliveryAck(data.mid, data.fromId, 'seen'), 200);
+          }
         }
-        toast(`${from}: ${String(data.text).slice(0, 80)}`, 'ok');
-        try { navigator.vibrate?.(80); } catch {}
         return;
       }
 
-      // Not in room yet but message for me → open join popup with message
       if (toMe && data.room) {
         showIncomingChat({
           t: 'chat-request',
@@ -1806,6 +2131,49 @@
     el.btnInviteAccept?.addEventListener('click', acceptInvite);
     el.btnInviteDecline?.addEventListener('click', declineInvite);
 
+    // Home tabs: Users / Groups
+    $$('[data-home-tab]').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        $$('[data-home-tab]').forEach((t) => t.classList.toggle('active', t === tab));
+        const name = tab.getAttribute('data-home-tab');
+        $('#paneUsers')?.classList.toggle('active', name === 'users');
+        $('#paneGroups')?.classList.toggle('active', name === 'groups');
+        if (name === 'groups') renderGroupList();
+      });
+    });
+
+    $('#btnCreateGroup')?.addEventListener('click', () => {
+      $('#createGroupModal')?.classList.remove('hidden');
+      $('#newGroupName')?.focus();
+    });
+    $('#btnJoinGroup')?.addEventListener('click', () => {
+      $('#joinGroupModal')?.classList.remove('hidden');
+      $('#joinGroupCode')?.focus();
+    });
+    $$('[data-close-cg]').forEach((n) => n.addEventListener('click', () => $('#createGroupModal')?.classList.add('hidden')));
+    $$('[data-close-jg]').forEach((n) => n.addEventListener('click', () => $('#joinGroupModal')?.classList.add('hidden')));
+    $('#btnDoCreateGroup')?.addEventListener('click', () => {
+      const name = $('#newGroupName')?.value || '';
+      $('#createGroupModal')?.classList.add('hidden');
+      createGroup(name);
+    });
+    $('#btnDoJoinGroup')?.addEventListener('click', () => {
+      const code = $('#joinGroupCode')?.value || '';
+      const name = $('#joinGroupName')?.value || '';
+      $('#joinGroupModal')?.classList.add('hidden');
+      joinGroupByCode(code, name);
+    });
+    $('#btnMembers')?.addEventListener('click', () => {
+      $('#membersDrawer')?.classList.add('open');
+    });
+    $('#btnCloseMembers')?.addEventListener('click', () => {
+      $('#membersDrawer')?.classList.remove('open');
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') markVisibleMessagesSeen();
+    });
+
     el.btnRandomRoom?.addEventListener('click', () => {
       el.roomInput.value = randomRoom();
       el.roomInput.focus();
@@ -1923,9 +2291,11 @@
   // Boot: register once → home nearby users
   bind();
   const bootName = loadName();
+  loadGroups();
   if (bootName) {
     state.name = bootName;
     showJoin();
+    renderGroupList();
     setTimeout(() => {
       ensureMqtt();
       publishPresence(true);
@@ -1936,10 +2306,19 @@
     showRegister();
   }
 
-  if (roomFromUrl() && bootName && window.Peer) {
-    if (el.roomInput) el.roomInput.value = roomFromUrl();
-    setTimeout(() => el.btnJoin?.click(), 600);
-  } else if (roomFromUrl() && el.roomInput) {
-    el.roomInput.value = roomFromUrl();
+  // Deep link: ?room=CODE&group=1&gname=Name
+  const bootRoom = roomFromUrl();
+  const params = new URLSearchParams(location.search);
+  if (bootRoom && bootName && window.Peer) {
+    if (el.roomInput) el.roomInput.value = bootRoom;
+    if (params.get('group') === '1') {
+      state.isGroup = true;
+      state.groupName = params.get('gname') || bootRoom;
+      setTimeout(() => openGroup(bootRoom, state.groupName), 500);
+    } else {
+      setTimeout(() => el.btnJoin?.click(), 600);
+    }
+  } else if (bootRoom && el.roomInput) {
+    el.roomInput.value = bootRoom;
   }
 })();
