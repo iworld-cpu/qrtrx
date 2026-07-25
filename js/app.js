@@ -1292,6 +1292,27 @@
     if (data.t === 'invite-broadcast' && data.to === getPresenceId() && data.room) {
       onMqttMessage(topic, { ...data, t: 'invite' });
     }
+
+    // MQTT chat relay (works even when PeerJS mesh is flaky)
+    if (data.t === 'chat-relay' && data.text) {
+      const myName = (state.name || el.nameInput?.value || '').trim().toLowerCase();
+      const to = String(data.toName || '').trim().toLowerCase();
+      const from = String(data.fromName || 'Someone');
+      const sameRoom = !!(state.room && data.room && String(state.room).toUpperCase() === String(data.room).toUpperCase());
+      const toMe = !!(to && myName && (myName === to || myName.includes(to) || to.includes(myName)));
+      const toAll = !to || data.broadcast === true;
+      if (data.fromId && data.fromId === getPresenceId()) return;
+      if (sameRoom || toMe || (toAll && sameRoom)) {
+        // If on join screen, still toast
+        if (el.viewRoom?.classList.contains('active')) {
+          addChat({ name: from, text: String(data.text).slice(0, 4000), me: false });
+        }
+        toast(`${from}: ${String(data.text).slice(0, 80)}`, 'ok', 4000);
+        try { navigator.vibrate?.(80); } catch {}
+      } else if (toMe) {
+        toast(`${from}: ${String(data.text).slice(0, 100)}`, 'ok', 5000);
+      }
+    }
   }
 
   function onNameTyped() {
