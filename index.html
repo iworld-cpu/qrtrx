@@ -35,7 +35,8 @@
         </p>
 
         <label class="lbl" for="nameInput">Your name</label>
-        <input id="nameInput" class="inp" maxlength="24" placeholder="e.g. Arun" autocomplete="nickname" />
+        <input id="nameInput" class="inp" maxlength="24" placeholder="e.g. Arun — type to appear nearby" autocomplete="nickname" />
+        <p id="presenceHint" class="presence-hint">Type name → you appear in Nearby for others</p>
 
         <label class="lbl" for="roomInput">Room code</label>
         <div class="row">
@@ -147,15 +148,30 @@
     <div class="modal-bg" data-close-nearby></div>
     <div class="modal-card nearby-card">
       <button type="button" class="x" data-close-nearby aria-label="Close">×</button>
-      <h2>📡 Nearby scan</h2>
-      <p class="sub">Scan host QR · or pick a live room</p>
+      <h2>📡 Nearby people</h2>
+      <p class="sub">Name type panna list-la varum · click → join</p>
 
       <div class="nearby-tabs">
-        <button type="button" class="tab active" data-tab="camera">📷 Scan QR</button>
-        <button type="button" class="tab" data-tab="live">🟢 Live rooms</button>
+        <button type="button" class="tab active" data-tab="live">🟢 People</button>
+        <button type="button" class="tab" data-tab="camera">📷 Scan QR</button>
       </div>
 
-      <div id="tabCamera" class="tab-pane active">
+      <div id="tabLive" class="tab-pane active">
+        <div class="live-head">
+          <span id="nearbyStatus">Type your name to go online…</span>
+          <button type="button" id="btnRefreshNearby" class="btn ghost sm">Refresh</button>
+        </div>
+        <ul id="nearbyList" class="nearby-list">
+          <li class="nearby-empty">No one yet.<br/>Both devices: open site → type name → wait 2 sec</li>
+        </ul>
+        <div class="manual-room">
+          <input id="nearbyRoomInput" class="inp mono" maxlength="8" placeholder="Or type room code" />
+          <button type="button" id="btnNearbyJoinCode" class="btn primary">Join</button>
+        </div>
+        <p class="hint-sm center">Same app + internet. Click a person in a room to join them.</p>
+      </div>
+
+      <div id="tabCamera" class="tab-pane">
         <div class="cam-wrap">
           <video id="camVideo" class="cam-video" playsinline muted autoplay></video>
           <canvas id="camCanvas" class="hidden"></canvas>
@@ -170,21 +186,6 @@
             <input type="file" id="qrFileInput" accept="image/*" capture="environment" hidden />
           </label>
         </div>
-        <div class="manual-room">
-          <input id="nearbyRoomInput" class="inp mono" maxlength="8" placeholder="Or type room code" />
-          <button type="button" id="btnNearbyJoinCode" class="btn primary">Join</button>
-        </div>
-      </div>
-
-      <div id="tabLive" class="tab-pane">
-        <div class="live-head">
-          <span id="nearbyStatus">Searching…</span>
-          <button type="button" id="btnRefreshNearby" class="btn ghost sm">Refresh</button>
-        </div>
-        <ul id="nearbyList" class="nearby-list">
-          <li class="nearby-empty">No rooms yet — host must Enter hive first</li>
-        </ul>
-        <p class="hint-sm center">Live list needs internet (PeerJS). QR scan works offline camera-only.</p>
       </div>
     </div>
   </div>
@@ -192,10 +193,11 @@
   <div id="toasts" class="toasts"></div>
   <div id="statusDot" class="status-dot" title="Connection"></div>
 
-  <!-- libs: PeerJS + QR gen (qrcodejs) + jsQR decode -->
+  <!-- libs: PeerJS + MQTT presence + QR gen + jsQR -->
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="https://unpkg.com/mqtt@5.10.4/dist/mqtt.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
-  <script src="js/app.js?v=3"></script>
+  <script src="js/app.js?v=4"></script>
 </body>
 </html>

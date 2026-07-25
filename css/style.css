@@ -109,6 +109,14 @@ body {
 .btn.ghost { background: transparent; border-color: transparent; color: var(--muted); }
 .btn.block { width: 100%; margin-top: 18px; }
 .nearby-btn { margin-top: 10px !important; }
+.presence-hint {
+  text-align: left; font-size: 0.78rem; color: var(--ok);
+  margin: 6px 0 0; min-height: 1.2em; opacity: 0.95;
+}
+.presence-hint.off { color: var(--dim); }
+.nearby-item .st-online { color: var(--ok); }
+.nearby-item .st-room { color: var(--accent); }
+.nearby-item.me-item { opacity: 0.75; border-style: dashed; }
 .btn.sm { padding: 8px 12px; font-size: 0.85rem; }
 .btn.icon { width: 40px; height: 40px; padding: 0; border-radius: 12px; font-size: 0.8rem; font-weight: 700; }
 
