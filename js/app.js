@@ -190,9 +190,16 @@
     return s;
   }
 
+  function sanitizeRoom(r) {
+    const s = String(r || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+    // reject garbage like Vundefined...
+    if (!s || s.includes('UNDEFINED') || s.length < 4) return '';
+    return s;
+  }
+
   function roomFromUrl() {
     const p = new URLSearchParams(location.search);
-    return (p.get('room') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+    return sanitizeRoom(p.get('room') || '');
   }
 
   function joinUrl() {
@@ -261,7 +268,10 @@
 
   /** Shared private room id for two users (same code both sides) */
   function pairRoomCode(idA, idB) {
-    const s = [String(idA), String(idB)].sort().join('|');
+    const a = String(idA || 'x');
+    const b = String(idB || 'y');
+    // never hash real "undefined" strings from bad calls
+    const s = [a === 'undefined' ? 'x' : a, b === 'undefined' ? 'y' : b].sort().join('|');
     let h = 2166136261;
     for (let i = 0; i < s.length; i++) {
       h ^= s.charCodeAt(i);
@@ -269,12 +279,14 @@
     }
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let out = '';
-    let x = h >>> 0;
+    let x = (h >>> 0) || 1;
     for (let i = 0; i < 6; i++) {
-      out += chars[x % chars.length];
-      x = Math.floor(x / chars.length) ^ (h >>> (i * 3));
+      const idx = Math.abs(x % chars.length);
+      out += chars[idx] || 'A';
+      x = (Math.floor(x / chars.length) ^ (h >>> ((i * 3) % 16))) >>> 0;
+      if (!x) x = (h + i + 1) >>> 0;
     }
-    return out;
+    return sanitizeRoom(out) || randomRoom();
   }
 
   function registerUsername(raw) {
@@ -922,6 +934,7 @@
   }
 
   function enterRoom(name, room) {
+    room = sanitizeRoom(room) || randomRoom();
     destroyPeer();
     state.name = name;
     state.room = room;
@@ -1281,10 +1294,8 @@
   function upsertPerson(p) {
     if (!p?.id || !p?.name) return;
     const name = String(p.name).trim().slice(0, 24);
-    if (!name) return;
-    const room = p.room
-      ? String(p.room).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8)
-      : '';
+    if (!name || name.includes('undefined')) return;
+    const room = sanitizeRoom(p.room);
     state.nearbyPeople.set(p.id, {
       id: p.id,
       name,
@@ -1604,12 +1615,15 @@
   function presencePayload() {
     const name = (state.name || el.nameInput?.value || '').trim().slice(0, 24);
     if (!name) return null;
+    const room = sanitizeRoom(state.room);
+    // self-heal corrupt room stuck in state
+    if (state.room && !room) state.room = '';
     return {
       t: 'presence',
       id: getPresenceId(),
       name,
-      room: state.room || '',
-      status: state.room ? 'room' : 'online',
+      room: room || '',
+      status: room ? 'room' : 'online',
       ts: Date.now()
     };
   }
