@@ -47,9 +47,13 @@
           Enter hive <span>→</span>
         </button>
 
+        <button type="button" id="btnNearby" class="btn secondary block nearby-btn">
+          📡 Nearby scan
+        </button>
+
         <div class="tips">
           <div class="tip"><span>①</span> Host opens site &amp; enters room</div>
-          <div class="tip"><span>②</span> Show QR — others scan on same Wi‑Fi</div>
+          <div class="tip"><span>②</span> Nearby scan / QR — friends join</div>
           <div class="tip"><span>③</span> Chat + drag files to anyone</div>
         </div>
         <p class="fine">Signaling uses free PeerJS cloud (needs internet once). File &amp; chat data go peer‑to‑peer — prefers LAN.</p>
@@ -66,6 +70,7 @@
           <span id="roleBadge" class="badge soft">…</span>
         </div>
         <div class="bar-right">
+          <button type="button" id="btnNearbyInRoom" class="btn ghost sm" title="Nearby">📡 Nearby</button>
           <button type="button" id="btnQr" class="btn icon" title="QR code">QR</button>
           <button type="button" id="btnCopy" class="btn icon" title="Copy link">⧉</button>
           <button type="button" id="btnLeave" class="btn ghost sm">Leave</button>
@@ -119,7 +124,7 @@
     </section>
   </div>
 
-  <!-- QR Modal -->
+  <!-- QR share Modal -->
   <div id="qrModal" class="modal hidden">
     <div class="modal-bg" data-close></div>
     <div class="modal-card">
@@ -135,12 +140,46 @@
     </div>
   </div>
 
+  <!-- Nearby Scan Modal -->
+  <div id="nearbyModal" class="modal hidden">
+    <div class="modal-bg" data-close-nearby></div>
+    <div class="modal-card nearby-card">
+      <button type="button" class="x" data-close-nearby aria-label="Close">×</button>
+      <h2>📡 Nearby scan</h2>
+      <p class="sub">Camera QR · or live rooms nearby</p>
+
+      <div class="nearby-tabs">
+        <button type="button" class="tab active" data-tab="camera">📷 Camera QR</button>
+        <button type="button" class="tab" data-tab="live">🟢 Live rooms</button>
+      </div>
+
+      <div id="tabCamera" class="tab-pane active">
+        <div id="qrReader" class="qr-reader"></div>
+        <p class="hint-sm center">Point camera at someone’s HiveDrop QR</p>
+        <button type="button" id="btnStartCam" class="btn secondary block">Start camera</button>
+        <button type="button" id="btnStopCam" class="btn ghost block hidden">Stop camera</button>
+      </div>
+
+      <div id="tabLive" class="tab-pane">
+        <div class="live-head">
+          <span id="nearbyStatus">Searching…</span>
+          <button type="button" id="btnRefreshNearby" class="btn ghost sm">Refresh</button>
+        </div>
+        <ul id="nearbyList" class="nearby-list">
+          <li class="nearby-empty">No rooms yet — ask host to open a room (they appear automatically)</li>
+        </ul>
+        <p class="hint-sm center">Hosts who entered a room show up here for ~1 min</p>
+      </div>
+    </div>
+  </div>
+
   <div id="toasts" class="toasts"></div>
   <div id="statusDot" class="status-dot" title="Connection"></div>
 
-  <!-- libs: PeerJS + QR -->
+  <!-- libs: PeerJS + QR gen + QR scan -->
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

@@ -8,6 +8,8 @@
   const CHUNK = 16 * 1024; // 16 KB
   const MAX_FILE = 200 * 1024 * 1024; // 200 MB soft cap per file
   const PEER_PREFIX = 'hivedrop-';
+  const NEARBY_HUB_ID = 'qrtrx-nearby-hub-v1';
+  const NEARBY_TTL_MS = 70_000;
 
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -19,6 +21,8 @@
     roomInput: $('#roomInput'),
     btnRandomRoom: $('#btnRandomRoom'),
     btnJoin: $('#btnJoin'),
+    btnNearby: $('#btnNearby'),
+    btnNearbyInRoom: $('#btnNearbyInRoom'),
     roomBadge: $('#roomBadge'),
     roleBadge: $('#roleBadge'),
     btnQr: $('#btnQr'),
@@ -40,22 +44,19 @@
     qrCanvas: $('#qrCanvas'),
     joinUrl: $('#joinUrl'),
     btnCopyModal: $('#btnCopyModal'),
+    nearbyModal: $('#nearbyModal'),
+    nearbyList: $('#nearbyList'),
+    nearbyStatus: $('#nearbyStatus'),
+    btnRefreshNearby: $('#btnRefreshNearby'),
+    btnStartCam: $('#btnStartCam'),
+    btnStopCam: $('#btnStopCam'),
+    qrReader: $('#qrReader'),
+    tabCamera: $('#tabCamera'),
+    tabLive: $('#tabLive'),
     toasts: $('#toasts'),
     statusDot: $('#statusDot'),
   };
 
-  /** @type {{
-   *  peer: import('peerjs').Peer | null,
-   *  id: string | null,
-   *  name: string,
-   *  room: string,
-   *  isHost: boolean,
-   *  hostId: string,
-   *  conns: Map<string, any>,
-   *  peers: Map<string, {id:string,name:string,isHost?:boolean}>,
-   *  pendingFiles: File[],
-   *  incoming: Map<string, any>,
-   * }} */
   const state = {
     peer: null,
     id: null,
@@ -67,7 +68,27 @@
     peers: new Map(),
     pendingFiles: [],
     incoming: new Map(),
+    // nearby
+    nearbyPeer: null,
+    nearbyConn: null,
+    nearbyRooms: new Map(), // room -> { name, room, url, ts }
+    announceTimer: null,
+    html5Qr: null,
+    isNearbyHub: false,
+    nearbyHubConns: new Map(),
   };
+
+  function peerConfig() {
+    return {
+      debug: 1,
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+      }
+    };
+  }
 
   // ── utils ──────────────────────────────────────────────
   function toast(msg, type = '') {
@@ -530,6 +551,7 @@
 
   // ── Bootstrap peer ─────────────────────────────────────
   function destroyPeer() {
+    stopAnnouncing();
     try {
       for (const c of state.conns.values()) c.close();
     } catch {}
@@ -556,15 +578,7 @@
     state.hostId = hid;
 
     // Try become host first
-    const hostPeer = new Peer(hid, {
-      debug: 1,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
-        ]
-      }
-    });
+    const hostPeer = new Peer(hid, peerConfig());
 
     let settled = false;
 
@@ -615,15 +629,7 @@
   }
 
   function becomeClient(name, room, hid) {
-    const client = new Peer({
-      debug: 1,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
-        ]
-      }
-    });
+    const client = new Peer(peerConfig());
 
     state.peer = client;
     state.isHost = false;
@@ -680,6 +686,10 @@
 
     if (state.isHost) {
       setTimeout(() => openQr(), 350);
+      // Broadcast room to Nearby live list
+      startAnnouncing();
+    } else {
+      // members can also appear optional — only host announces
     }
   }
 
@@ -712,12 +722,346 @@
   }
 
   function leave() {
+    stopAnnouncing();
     destroyPeer();
     const u = new URL(location.href);
     u.searchParams.delete('room');
     history.replaceState(null, '', u.pathname + u.hash);
     showJoin();
     toast('Left room');
+  }
+
+  // ── Nearby: live rooms + camera QR ─────────────────────
+  function openNearby() {
+    el.nearbyModal.classList.remove('hidden');
+    switchNearbyTab('camera');
+    startNearbyClient();
+  }
+
+  function closeNearby() {
+    stopCamera();
+    // keep nearby peer for announce if in room; only destroy if not announcing
+    if (!state.announceTimer) {
+      destroyNearbyPeer();
+    }
+    el.nearbyModal.classList.add('hidden');
+  }
+
+  function switchNearbyTab(name) {
+    $$('.nearby-tabs .tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
+    el.tabCamera.classList.toggle('active', name === 'camera');
+    el.tabLive.classList.toggle('active', name === 'live');
+    if (name === 'live') {
+      stopCamera();
+      startNearbyClient();
+      renderNearbyList();
+    }
+  }
+
+  function destroyNearbyPeer() {
+    try {
+      for (const c of state.nearbyHubConns.values()) c.close();
+    } catch {}
+    state.nearbyHubConns.clear();
+    try { state.nearbyConn?.close(); } catch {}
+    state.nearbyConn = null;
+    try { state.nearbyPeer?.destroy(); } catch {}
+    state.nearbyPeer = null;
+    state.isNearbyHub = false;
+  }
+
+  function pruneNearby() {
+    const now = Date.now();
+    for (const [room, info] of state.nearbyRooms) {
+      if (now - info.ts > NEARBY_TTL_MS) state.nearbyRooms.delete(room);
+    }
+  }
+
+  function renderNearbyList() {
+    pruneNearby();
+    const rooms = [...state.nearbyRooms.values()].sort((a, b) => b.ts - a.ts);
+    if (!rooms.length) {
+      el.nearbyList.innerHTML = '<li class="nearby-empty">No rooms yet — open a room on another device (it appears automatically)</li>';
+      return;
+    }
+    el.nearbyList.innerHTML = rooms.map((r) => {
+      const age = Math.max(0, Math.round((Date.now() - r.ts) / 1000));
+      return `<li class="nearby-item" data-room="${escapeHtml(r.room)}" data-url="${escapeHtml(r.url || '')}">
+        <div class="av">${escapeHtml(initials(r.name))}</div>
+        <div class="meta">
+          <div class="nm">${escapeHtml(r.name || 'Host')}</div>
+          <div class="rm">${escapeHtml(r.room)} · ${age}s ago</div>
+        </div>
+        <span class="join-chip">Join →</span>
+      </li>`;
+    }).join('');
+
+    el.nearbyList.querySelectorAll('.nearby-item').forEach((item) => {
+      item.addEventListener('click', () => {
+        const room = item.dataset.room;
+        if (!room) return;
+        el.roomInput.value = room;
+        closeNearby();
+        toast(`Room ${room} selected`, 'ok');
+        // auto join if name set
+        if ((el.nameInput.value || '').trim()) {
+          el.btnJoin.click();
+        } else {
+          el.nameInput.focus();
+        }
+      });
+    });
+  }
+
+  function handleNearbyData(data, fromConn) {
+    if (!data || typeof data !== 'object') return;
+
+    if (data.t === 'announce' && data.room) {
+      state.nearbyRooms.set(data.room, {
+        name: data.name || 'Host',
+        room: String(data.room).toUpperCase(),
+        url: data.url || '',
+        ts: data.ts || Date.now()
+      });
+      if (state.isNearbyHub) {
+        // relay to all scanners
+        for (const c of state.nearbyHubConns.values()) {
+          if (c !== fromConn && c.open) {
+            try { c.send(data); } catch {}
+          }
+        }
+      }
+      renderNearbyList();
+      if (el.nearbyStatus) el.nearbyStatus.textContent = `${state.nearbyRooms.size} live room(s)`;
+    }
+
+    if (data.t === 'room-list' && Array.isArray(data.rooms)) {
+      for (const r of data.rooms) {
+        if (!r?.room) continue;
+        state.nearbyRooms.set(r.room, {
+          name: r.name || 'Host',
+          room: String(r.room).toUpperCase(),
+          url: r.url || '',
+          ts: r.ts || Date.now()
+        });
+      }
+      renderNearbyList();
+      if (el.nearbyStatus) el.nearbyStatus.textContent = `${state.nearbyRooms.size} live room(s)`;
+    }
+
+    if (data.t === 'scan-hello' && state.isNearbyHub && fromConn) {
+      pruneNearby();
+      try {
+        fromConn.send({
+          t: 'room-list',
+          rooms: [...state.nearbyRooms.values()]
+        });
+      } catch {}
+    }
+  }
+
+  function wireNearbyConn(conn, asHub) {
+    conn.on('open', () => {
+      if (asHub) {
+        state.nearbyHubConns.set(conn.peer, conn);
+        pruneNearby();
+        try {
+          conn.send({ t: 'room-list', rooms: [...state.nearbyRooms.values()] });
+        } catch {}
+      } else {
+        state.nearbyConn = conn;
+        try { conn.send({ t: 'scan-hello' }); } catch {}
+        // if we are in a room, announce
+        if (state.room && state.name) sendAnnounce();
+      }
+      if (el.nearbyStatus) el.nearbyStatus.textContent = 'Connected · listening';
+    });
+    conn.on('data', (d) => handleNearbyData(d, conn));
+    conn.on('close', () => {
+      state.nearbyHubConns.delete(conn.peer);
+      if (state.nearbyConn === conn) state.nearbyConn = null;
+    });
+  }
+
+  function startNearbyClient() {
+    if (!window.Peer) {
+      if (el.nearbyStatus) el.nearbyStatus.textContent = 'PeerJS missing — check internet';
+      return;
+    }
+    if (state.nearbyPeer && !state.nearbyPeer.destroyed) {
+      // already up — request refresh
+      if (state.nearbyConn?.open) {
+        try { state.nearbyConn.send({ t: 'scan-hello' }); } catch {}
+      }
+      renderNearbyList();
+      return;
+    }
+
+    if (el.nearbyStatus) el.nearbyStatus.textContent = 'Connecting…';
+
+    // Try become hub first (first visitor becomes discovery hub)
+    const hub = new Peer(NEARBY_HUB_ID, peerConfig());
+    let settled = false;
+
+    const asClient = () => {
+      if (settled) return;
+      settled = true;
+      try { hub.destroy(); } catch {}
+      const client = new Peer(peerConfig());
+      state.nearbyPeer = client;
+      state.isNearbyHub = false;
+      client.on('open', () => {
+        const conn = client.connect(NEARBY_HUB_ID, { reliable: true });
+        wireNearbyConn(conn, false);
+      });
+      client.on('error', (err) => {
+        console.warn('nearby client', err);
+        if (el.nearbyStatus) el.nearbyStatus.textContent = 'Nearby offline — use Camera QR';
+      });
+    };
+
+    hub.on('open', () => {
+      if (settled) return;
+      settled = true;
+      state.nearbyPeer = hub;
+      state.isNearbyHub = true;
+      if (el.nearbyStatus) el.nearbyStatus.textContent = 'Hub ready · waiting for rooms';
+      hub.on('connection', (conn) => wireNearbyConn(conn, true));
+      // also announce if already in room
+      if (state.room) startAnnouncing();
+    });
+
+    hub.on('error', (err) => {
+      if (err?.type === 'unavailable-id') asClient();
+    });
+
+    setTimeout(() => { if (!settled) asClient(); }, 4000);
+  }
+
+  function announcePayload() {
+    return {
+      t: 'announce',
+      name: state.name || el.nameInput.value || 'Host',
+      room: state.room,
+      url: joinUrl(),
+      ts: Date.now()
+    };
+  }
+
+  function sendAnnounce() {
+    if (!state.room) return;
+    const payload = announcePayload();
+    // self list
+    state.nearbyRooms.set(payload.room, {
+      name: payload.name,
+      room: payload.room,
+      url: payload.url,
+      ts: payload.ts
+    });
+
+    if (state.isNearbyHub) {
+      for (const c of state.nearbyHubConns.values()) {
+        if (c.open) try { c.send(payload); } catch {}
+      }
+    } else if (state.nearbyConn?.open) {
+      try { state.nearbyConn.send(payload); } catch {}
+    } else {
+      // ensure nearby link
+      startNearbyClient();
+    }
+  }
+
+  function startAnnouncing() {
+    stopAnnouncing();
+    startNearbyClient();
+    sendAnnounce();
+    state.announceTimer = setInterval(sendAnnounce, 12_000);
+  }
+
+  function stopAnnouncing() {
+    if (state.announceTimer) {
+      clearInterval(state.announceTimer);
+      state.announceTimer = null;
+    }
+  }
+
+  // Camera QR
+  async function startCamera() {
+    if (!window.Html5Qrcode) {
+      toast('QR scanner lib missing — check internet', 'err');
+      return;
+    }
+    stopCamera();
+    const readerId = 'qrReader';
+    state.html5Qr = new Html5Qrcode(readerId);
+    el.btnStartCam.classList.add('hidden');
+    el.btnStopCam.classList.remove('hidden');
+    try {
+      await state.html5Qr.start(
+        { facingMode: 'environment' },
+        { fps: 10, qrbox: { width: 220, height: 220 } },
+        (decoded) => onQrDecoded(decoded),
+        () => {}
+      );
+    } catch (e) {
+      console.warn(e);
+      // try user facing
+      try {
+        await state.html5Qr.start(
+          { facingMode: 'user' },
+          { fps: 10, qrbox: { width: 220, height: 220 } },
+          (decoded) => onQrDecoded(decoded),
+          () => {}
+        );
+      } catch (e2) {
+        toast('Camera permission needed', 'err');
+        el.btnStartCam.classList.remove('hidden');
+        el.btnStopCam.classList.add('hidden');
+        state.html5Qr = null;
+      }
+    }
+  }
+
+  async function stopCamera() {
+    if (state.html5Qr) {
+      try {
+        if (state.html5Qr.isScanning) await state.html5Qr.stop();
+        await state.html5Qr.clear();
+      } catch {}
+      state.html5Qr = null;
+    }
+    el.btnStartCam?.classList.remove('hidden');
+    el.btnStopCam?.classList.add('hidden');
+  }
+
+  function onQrDecoded(text) {
+    if (!text) return;
+    let room = '';
+    try {
+      if (text.includes('room=')) {
+        const u = new URL(text, location.href);
+        room = (u.searchParams.get('room') || '').toUpperCase();
+      } else if (/^[A-Z0-9]{4,8}$/i.test(text.trim())) {
+        room = text.trim().toUpperCase();
+      }
+    } catch {
+      const m = String(text).match(/room=([A-Za-z0-9]{4,8})/i);
+      if (m) room = m[1].toUpperCase();
+    }
+    if (!room) {
+      toast('Not a HiveDrop QR', 'err');
+      return;
+    }
+    stopCamera();
+    el.roomInput.value = room;
+    closeNearby();
+    toast(`Scanned room ${room}`, 'ok');
+    if ((el.nameInput.value || loadName() || '').trim()) {
+      el.btnJoin.click();
+    } else {
+      el.nameInput.focus();
+      toast('Type your name, then Enter hive', '');
+    }
   }
 
   // ── Events ─────────────────────────────────────────────
@@ -758,7 +1102,32 @@
     el.btnCopy.addEventListener('click', copyLink);
     el.btnCopyModal.addEventListener('click', copyLink);
     el.qrModal.querySelectorAll('[data-close]').forEach((n) => n.addEventListener('click', closeQr));
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeQr(); });
+
+    el.btnNearby?.addEventListener('click', openNearby);
+    el.btnNearbyInRoom?.addEventListener('click', openNearby);
+    el.nearbyModal?.querySelectorAll('[data-close-nearby]').forEach((n) => {
+      n.addEventListener('click', closeNearby);
+    });
+    $$('.nearby-tabs .tab').forEach((t) => {
+      t.addEventListener('click', () => switchNearbyTab(t.dataset.tab));
+    });
+    el.btnStartCam?.addEventListener('click', startCamera);
+    el.btnStopCam?.addEventListener('click', stopCamera);
+    el.btnRefreshNearby?.addEventListener('click', () => {
+      if (el.nearbyStatus) el.nearbyStatus.textContent = 'Refreshing…';
+      startNearbyClient();
+      if (state.nearbyConn?.open) {
+        try { state.nearbyConn.send({ t: 'scan-hello' }); } catch {}
+      }
+      renderNearbyList();
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closeQr();
+        closeNearby();
+      }
+    });
 
     el.btnSendChat.addEventListener('click', sendChat);
     el.chatInput.addEventListener('keydown', (e) => {
