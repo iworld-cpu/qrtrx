@@ -264,12 +264,23 @@ body {
 }
 .modal-card h2 { font-size: 1.2rem; margin-bottom: 4px; }
 .sub { color: var(--dim); font-size: 0.85rem; margin-bottom: 14px; }
-#qrCanvas {
-  background: #fff; border-radius: 14px; padding: 10px; max-width: 100%;
+.qr-box {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: #fff; border-radius: 14px; padding: 12px; min-height: 260px; min-width: 260px;
+  box-shadow: 0 12px 40px rgba(56,189,248,0.12); margin: 0 auto;
+}
+.qr-box img, .qr-box canvas { display: block; border-radius: 4px; }
+.qr-img {
+  display: block; margin: 0 auto; background: #fff; border-radius: 14px; padding: 12px;
   box-shadow: 0 12px 40px rgba(56,189,248,0.12);
 }
-.join-url { margin: 12px 0; font-size: 0.7rem; color: var(--muted); word-break: break-all; }
-.modal-actions { display: flex; gap: 8px; justify-content: center; }
+.qr-img.hidden, .hidden { display: none !important; }
+.qr-room-big {
+  margin-top: 10px; font-size: 1.4rem; font-weight: 800; letter-spacing: 0.2em;
+  color: var(--accent); text-align: center;
+}
+.join-url { margin: 12px 0 4px; font-size: 0.7rem; color: var(--muted); word-break: break-all; }
+.modal-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 
 /* Nearby scan */
 .nearby-card { width: min(420px, 100%); text-align: left; }
@@ -289,11 +300,26 @@ body {
 }
 .tab-pane { display: none; }
 .tab-pane.active { display: block; }
-.qr-reader {
-  width: 100%; min-height: 220px; border-radius: 14px; overflow: hidden;
-  background: #000; border: 1px solid var(--border); margin-bottom: 10px;
+.cam-wrap {
+  position: relative; width: 100%; aspect-ratio: 1; max-height: 320px;
+  border-radius: 14px; overflow: hidden; background: #000;
+  border: 1px solid var(--border); margin-bottom: 10px;
 }
-.qr-reader video { object-fit: cover !important; }
+.cam-video {
+  width: 100%; height: 100%; object-fit: cover; display: block; background: #000;
+}
+.cam-overlay {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  background: rgba(0,0,0,0.55); color: var(--muted); font-size: 0.9rem; font-weight: 600;
+  pointer-events: none;
+}
+.cam-overlay.on { display: none; }
+.cam-actions {
+  display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 10px;
+}
+.file-label { cursor: pointer; margin: 0; }
+.manual-room { display: flex; gap: 8px; margin-top: 8px; }
+.manual-room .inp { flex: 1; letter-spacing: 0.14em; }
 .center { text-align: center; }
 .live-head {
   display: flex; align-items: center; justify-content: space-between;

@@ -130,9 +130,11 @@
     <div class="modal-card">
       <button type="button" class="x" data-close aria-label="Close">×</button>
       <h2>Scan to join</h2>
-      <p class="sub">Same Wi‑Fi · open camera · scan</p>
-      <canvas id="qrCanvas" width="280" height="280"></canvas>
+      <p class="sub">Phone camera or Nearby scan → point here</p>
+      <div id="qrBox" class="qr-box" aria-label="Room QR code"></div>
+      <img id="qrImg" class="qr-img hidden" alt="Room QR code" width="260" height="260" />
       <p id="joinUrl" class="join-url mono"></p>
+      <p id="qrRoomBig" class="qr-room-big mono"></p>
       <div class="modal-actions">
         <button type="button" id="btnCopyModal" class="btn secondary">Copy link</button>
         <button type="button" class="btn primary" data-close>Done</button>
@@ -146,18 +148,32 @@
     <div class="modal-card nearby-card">
       <button type="button" class="x" data-close-nearby aria-label="Close">×</button>
       <h2>📡 Nearby scan</h2>
-      <p class="sub">Camera QR · or live rooms nearby</p>
+      <p class="sub">Scan host QR · or pick a live room</p>
 
       <div class="nearby-tabs">
-        <button type="button" class="tab active" data-tab="camera">📷 Camera QR</button>
+        <button type="button" class="tab active" data-tab="camera">📷 Scan QR</button>
         <button type="button" class="tab" data-tab="live">🟢 Live rooms</button>
       </div>
 
       <div id="tabCamera" class="tab-pane active">
-        <div id="qrReader" class="qr-reader"></div>
-        <p class="hint-sm center">Point camera at someone’s HiveDrop QR</p>
-        <button type="button" id="btnStartCam" class="btn secondary block">Start camera</button>
-        <button type="button" id="btnStopCam" class="btn ghost block hidden">Stop camera</button>
+        <div class="cam-wrap">
+          <video id="camVideo" class="cam-video" playsinline muted autoplay></video>
+          <canvas id="camCanvas" class="hidden"></canvas>
+          <div id="camOverlay" class="cam-overlay">Camera off</div>
+        </div>
+        <p id="camStatus" class="hint-sm center">Allow camera · point at host QR</p>
+        <div class="cam-actions">
+          <button type="button" id="btnStartCam" class="btn secondary">Start camera</button>
+          <button type="button" id="btnStopCam" class="btn ghost hidden">Stop</button>
+          <label class="btn ghost file-label">
+            Upload QR photo
+            <input type="file" id="qrFileInput" accept="image/*" capture="environment" hidden />
+          </label>
+        </div>
+        <div class="manual-room">
+          <input id="nearbyRoomInput" class="inp mono" maxlength="8" placeholder="Or type room code" />
+          <button type="button" id="btnNearbyJoinCode" class="btn primary">Join</button>
+        </div>
       </div>
 
       <div id="tabLive" class="tab-pane">
@@ -166,9 +182,9 @@
           <button type="button" id="btnRefreshNearby" class="btn ghost sm">Refresh</button>
         </div>
         <ul id="nearbyList" class="nearby-list">
-          <li class="nearby-empty">No rooms yet — ask host to open a room (they appear automatically)</li>
+          <li class="nearby-empty">No rooms yet — host must Enter hive first</li>
         </ul>
-        <p class="hint-sm center">Hosts who entered a room show up here for ~1 min</p>
+        <p class="hint-sm center">Live list needs internet (PeerJS). QR scan works offline camera-only.</p>
       </div>
     </div>
   </div>
@@ -176,10 +192,10 @@
   <div id="toasts" class="toasts"></div>
   <div id="statusDot" class="status-dot" title="Connection"></div>
 
-  <!-- libs: PeerJS + QR gen + QR scan -->
+  <!-- libs: PeerJS + QR gen (qrcodejs) + jsQR decode -->
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
-  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
