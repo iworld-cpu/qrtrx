@@ -37,6 +37,15 @@
         <label class="lbl" for="nameInput">Your name</label>
         <input id="nameInput" class="inp" maxlength="24" placeholder="e.g. Arun — type to appear nearby" autocomplete="nickname" />
         <p id="presenceHint" class="presence-hint">Type name → you appear in Nearby for others</p>
+        <div id="homePeople" class="home-people">
+          <div class="home-people-h">
+            <span>Nearby now</span>
+            <span id="homePeopleCount" class="count">0</span>
+          </div>
+          <ul id="homePeopleList" class="home-people-list">
+            <li class="nearby-empty">Type your name to see people…</li>
+          </ul>
+        </div>
 
         <label class="lbl" for="roomInput">Room code</label>
         <div class="row">
@@ -193,11 +202,11 @@
   <div id="toasts" class="toasts"></div>
   <div id="statusDot" class="status-dot" title="Connection"></div>
 
-  <!-- libs: PeerJS + MQTT presence + QR gen + jsQR -->
+  <!-- libs: PeerJS + MQTT v4 (stable browser) + QR + jsQR -->
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
-  <script src="https://unpkg.com/mqtt@5.10.4/dist/mqtt.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
-  <script src="js/app.js?v=4"></script>
+  <script src="js/app.js?v=5"></script>
 </body>
 </html>

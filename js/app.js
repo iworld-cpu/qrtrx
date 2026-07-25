@@ -8,12 +8,16 @@
   const CHUNK = 16 * 1024; // 16 KB
   const MAX_FILE = 200 * 1024 * 1024; // 200 MB soft cap per file
   const PEER_PREFIX = 'hivedrop-';
-  const NEARBY_TTL_MS = 25_000;
+  const NEARBY_TTL_MS = 45_000;
   const PRESENCE_TOPIC = 'qrtrx/v1/presence';
   const MQTT_URLS = [
     'wss://broker.emqx.io:8084/mqtt',
     'wss://broker.hivemq.com:8884/mqtt'
   ];
+
+  function getMqttLib() {
+    return window.mqtt || globalThis.mqtt || null;
+  }
 
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -273,7 +277,8 @@
 
   // ── Peer protocol ──────────────────────────────────────
   function hostPeerId(room) {
-    return PEER_PREFIX + room.toLowerCase() + '-host';
+    // Short id — PeerJS free cloud is more reliable with short alphanumeric IDs
+    return 'qrx' + String(room || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8);
   }
 
   function send(conn, obj) {
@@ -665,32 +670,87 @@
     state.peer = client;
     state.isHost = false;
     state.hostId = hid;
+    let joined = false;
+    let tries = 0;
+
+    const finishJoin = () => {
+      if (joined) return;
+      joined = true;
+      onJoined();
+    };
+
+    const tryConnectHost = () => {
+      tries += 1;
+      try {
+        const conn = client.connect(hid, { reliable: true });
+        wireConn(conn);
+        conn.on('open', () => {
+          // ensure peer in list
+          if (!state.peers.has(hid)) {
+            state.peers.set(hid, { id: hid, name: 'Host', isHost: true });
+            renderPeers();
+          }
+          finishJoin();
+        });
+        // if not open in 4s, retry or takeover
+        setTimeout(() => {
+          if (joined) return;
+          if (tries < 3) {
+            tryConnectHost();
+          } else {
+            // Host ghost — become host ourselves
+            toast('Host offline — you are host now', 'ok');
+            try { client.destroy(); } catch {}
+            state.peer = null;
+            // re-enter as host claim
+            const hostPeer = new Peer(hid, peerConfig());
+            hostPeer.on('open', (id) => {
+              state.peer = hostPeer;
+              state.id = id;
+              state.isHost = true;
+              state.peers.set(id, { id, name, isHost: true });
+              hostPeer.on('connection', (c) => {
+                wireConn(c);
+                state.peers.set(c.peer, { id: c.peer, name: '…', isHost: false });
+                renderPeers();
+              });
+              finishJoin();
+            });
+            hostPeer.on('error', (err) => {
+              if (err?.type === 'unavailable-id') {
+                // someone took it — try client again
+                setTimeout(() => becomeClient(name, room, hid), 800);
+              } else {
+                toast('Could not join room — try again', 'err');
+                el.btnJoin.disabled = false;
+                el.btnJoin.innerHTML = 'Enter hive <span>→</span>';
+                destroyPeer();
+                showJoin();
+              }
+            });
+          }
+        }, 4000);
+      } catch (e) {
+        console.warn(e);
+      }
+    };
 
     client.on('open', (id) => {
       state.id = id;
       state.peers.set(id, { id, name, isHost: false });
-      // Connect to host
-      const conn = client.connect(hid, { reliable: true });
-      wireConn(conn);
-      onJoined();
+      tryConnectHost();
     });
 
     client.on('connection', (conn) => {
-      // mesh from others
       wireConn(conn);
     });
 
     client.on('error', (err) => {
       console.warn('client error', err);
       if (err?.type === 'peer-unavailable') {
-        toast('Host not found — create room first or check code', 'err');
-        setStatus('');
-        el.btnJoin.disabled = false;
-        el.btnJoin.innerHTML = 'Enter hive <span>→</span>';
-        destroyPeer();
-        showJoin();
+        // handled by retry / takeover timer
       } else if (err?.type === 'network') {
-        toast('Network error — need internet for first connect', 'err');
+        toast('Network error — need internet', 'err');
       }
     });
   }
@@ -858,9 +918,38 @@
     });
   }
 
+  function personRowHtml(p, me) {
+    const age = Math.max(0, Math.round((Date.now() - p.ts) / 1000));
+    const st = p.room
+      ? `<span class="st-room">Room ${escapeHtml(p.room)}</span>`
+      : `<span class="st-online">Online</span>`;
+    const chip = me ? 'You' : (p.room ? 'Join →' : 'Invite');
+    return `<li class="nearby-item${me ? ' me-item' : ''}" data-id="${escapeHtml(p.id)}" data-room="${escapeHtml(p.room || '')}" data-name="${escapeHtml(p.name)}">
+      <div class="av">${escapeHtml(initials(p.name))}</div>
+      <div class="meta">
+        <div class="nm">${escapeHtml(p.name)}${me ? ' (you)' : ''}</div>
+        <div class="rm">${st} · ${age}s</div>
+      </div>
+      <span class="join-chip">${chip}</span>
+    </li>`;
+  }
+
+  function bindPeopleClicks(root) {
+    if (!root) return;
+    root.querySelectorAll('.nearby-item').forEach((item) => {
+      item.addEventListener('click', () => {
+        if (item.classList.contains('me-item')) return;
+        const room = item.dataset.room;
+        const id = item.dataset.id;
+        const name = item.dataset.name || 'User';
+        if (room) joinRoomCode(room);
+        else invitePerson(id, name);
+      });
+    });
+  }
+
   function renderNearbyList() {
     prunePeople();
-    // Always show self if we have a name
     const myName = (state.name || el.nameInput?.value || '').trim();
     if (myName) {
       upsertPerson({
@@ -875,52 +964,42 @@
     const people = [...state.nearbyPeople.values()].sort((a, b) => {
       if (a.id === getPresenceId()) return -1;
       if (b.id === getPresenceId()) return 1;
-      if (!!b.room - !!a.room) return (b.room ? 1 : 0) - (a.room ? 1 : 0);
+      if (a.room && !b.room) return -1;
+      if (!a.room && b.room) return 1;
       return a.name.localeCompare(b.name);
     });
 
     const others = people.filter((p) => p.id !== getPresenceId());
     if (el.nearbyStatus) {
       el.nearbyStatus.textContent = state.mqttReady
-        ? `${people.length} online (${others.length} other)`
+        ? `${people.length} online · ${others.length} other`
         : 'Connecting presence…';
     }
 
-    if (!people.length) {
-      el.nearbyList.innerHTML = '<li class="nearby-empty">No one yet.<br/>Both phones/PCs: open site → type name → wait 2 sec → Refresh</li>';
-      return;
+    if (el.nearbyList) {
+      if (!people.length) {
+        el.nearbyList.innerHTML = '<li class="nearby-empty">No one yet.<br/>Both devices: open site → type name → wait 2 sec</li>';
+      } else {
+        el.nearbyList.innerHTML = people.map((p) => personRowHtml(p, p.id === getPresenceId())).join('');
+        bindPeopleClicks(el.nearbyList);
+      }
     }
 
-    el.nearbyList.innerHTML = people.map((p) => {
-      const me = p.id === getPresenceId();
-      const age = Math.max(0, Math.round((Date.now() - p.ts) / 1000));
-      const st = p.room
-        ? `<span class="st-room">Room ${escapeHtml(p.room)}</span>`
-        : `<span class="st-online">Online</span>`;
-      const chip = me ? 'You' : (p.room ? 'Join →' : 'Invite');
-      return `<li class="nearby-item${me ? ' me-item' : ''}" data-id="${escapeHtml(p.id)}" data-room="${escapeHtml(p.room || '')}" data-name="${escapeHtml(p.name)}">
-        <div class="av">${escapeHtml(initials(p.name))}</div>
-        <div class="meta">
-          <div class="nm">${escapeHtml(p.name)}${me ? ' (you)' : ''}</div>
-          <div class="rm">${st} · ${age}s</div>
-        </div>
-        <span class="join-chip">${chip}</span>
-      </li>`;
-    }).join('');
-
-    el.nearbyList.querySelectorAll('.nearby-item').forEach((item) => {
-      item.addEventListener('click', () => {
-        if (item.classList.contains('me-item')) return;
-        const room = item.dataset.room;
-        const id = item.dataset.id;
-        const name = item.dataset.name || 'User';
-        if (room) {
-          joinRoomCode(room);
-        } else {
-          invitePerson(id, name);
-        }
-      });
-    });
+    const homeList = $('#homePeopleList');
+    const homeCount = $('#homePeopleCount');
+    if (homeCount) homeCount.textContent = String(others.length);
+    if (homeList) {
+      if (!myName) {
+        homeList.innerHTML = '<li class="nearby-empty">Type your name to see people…</li>';
+      } else if (!others.length) {
+        homeList.innerHTML = state.mqttReady
+          ? '<li class="nearby-empty">You are online. Waiting for others…</li>'
+          : '<li class="nearby-empty">Connecting…</li>';
+      } else {
+        homeList.innerHTML = others.map((p) => personRowHtml(p, false)).join('');
+        bindPeopleClicks(homeList);
+      }
+    }
   }
 
   function joinRoomCode(room) {
@@ -1082,55 +1161,72 @@
       return;
     }
 
-    if (!window.mqtt) {
-      if (el.nearbyStatus) el.nearbyStatus.textContent = 'MQTT lib missing — refresh page';
-      console.warn('mqtt.js not loaded');
+    const M = getMqttLib();
+    if (!M || typeof M.connect !== 'function') {
+      if (el.nearbyStatus) el.nearbyStatus.textContent = 'MQTT lib missing — hard refresh (Ctrl+F5)';
+      console.warn('mqtt.js not loaded', M);
+      toast('Nearby library failed — refresh page', 'err');
       return;
     }
 
     const pid = getPresenceId();
     let urlIndex = 0;
+    let connecting = false;
 
     const connectNext = () => {
+      if (connecting) return;
       if (urlIndex >= MQTT_URLS.length) {
         if (el.nearbyStatus) el.nearbyStatus.textContent = 'Presence offline — try Refresh';
         state.mqttReady = false;
         updatePresenceHint();
+        // retry from first broker after pause
+        setTimeout(() => {
+          urlIndex = 0;
+          connectNext();
+        }, 5000);
         return;
       }
       const url = MQTT_URLS[urlIndex++];
+      connecting = true;
       try {
         if (state.mqtt) {
           try { state.mqtt.end(true); } catch {}
           state.mqtt = null;
         }
-        const client = mqtt.connect(url, {
-          clientId: 'qrtrx_' + pid,
+        const client = M.connect(url, {
+          clientId: 'qrtrx_' + pid + '_' + Math.random().toString(16).slice(2, 6),
           clean: true,
-          connectTimeout: 8000,
-          reconnectPeriod: 4000,
-          protocolVersion: 4
+          connectTimeout: 10000,
+          reconnectPeriod: 5000,
+          keepalive: 20
         });
         state.mqtt = client;
 
         client.on('connect', () => {
+          connecting = false;
           state.mqttReady = true;
           if (el.nearbyStatus) el.nearbyStatus.textContent = 'Presence online';
           try {
             client.subscribe(PRESENCE_TOPIC, { qos: 0 });
-            client.subscribe(`${PRESENCE_TOPIC}/invite/${pid}`, { qos: 0 });
+            client.subscribe(PRESENCE_TOPIC + '/invite/' + pid, { qos: 0 });
           } catch (e) {
             console.warn(e);
           }
+          // Request isn't needed — just spam our presence so others see us
           publishPresence(true);
           startPresenceLoop();
           updatePresenceHint();
-          if (typeof cb === 'function') cb();
+          renderNearbyList();
+          if (typeof cb === 'function') {
+            const fn = cb;
+            cb = null;
+            fn();
+          }
         });
 
         client.on('message', (topic, buf) => {
           let data;
-          try { data = JSON.parse(buf.toString()); } catch { return; }
+          try { data = JSON.parse(String(buf)); } catch { return; }
           onMqttMessage(topic, data);
         });
 
@@ -1150,11 +1246,15 @@
         // if not connected soon, try next broker
         setTimeout(() => {
           if (!state.mqttReady && state.mqtt === client) {
+            connecting = false;
             try { client.end(true); } catch {}
             connectNext();
+          } else {
+            connecting = false;
           }
-        }, 9000);
+        }, 10000);
       } catch (e) {
+        connecting = false;
         console.warn(e);
         connectNext();
       }
@@ -1167,8 +1267,8 @@
     if (!data || typeof data !== 'object') return;
 
     if (data.t === 'presence' && data.id) {
-      // ignore super old
-      if (data.ts && Date.now() - data.ts > NEARBY_TTL_MS * 2) return;
+      // clock-skew tolerant (5 min)
+      if (data.ts && Math.abs(Date.now() - data.ts) > 5 * 60 * 1000) return;
       upsertPerson(data);
       renderNearbyList();
       return;
@@ -1512,13 +1612,14 @@
 
   // Auto-join if room in URL + name saved
   bind();
-  // Go online as soon as page has a name
-  if (loadName()) {
-    setTimeout(() => onNameTyped(), 300);
-  }
+  // Always spin up presence early
+  setTimeout(() => {
+    if (loadName()) onNameTyped();
+    else ensureMqtt(); // connect so we at least receive others if name typed later
+  }, 200);
   if (roomFromUrl() && loadName() && window.Peer) {
     el.roomInput.value = roomFromUrl();
-    setTimeout(() => el.btnJoin.click(), 400);
+    setTimeout(() => el.btnJoin.click(), 500);
   } else if (roomFromUrl()) {
     el.roomInput.value = roomFromUrl();
   }
