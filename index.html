@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <meta name="theme-color" content="#0a0f1a" />
+  <meta name="description" content="HiveDrop — free local-network chat & file share. Open the site, scan QR, message & transfer. Host on GitHub Pages." />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>HiveDrop · LAN Chat & Files</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⬡</text></svg>" />
+  <!-- PWA-ish -->
+  <link rel="manifest" href="manifest.webmanifest" />
+</head>
+<body>
+  <div class="orb o1"></div>
+  <div class="orb o2"></div>
+  <div class="orb o3"></div>
+  <div class="grid"></div>
+
+  <div id="app">
+    <!-- JOIN -->
+    <section id="view-join" class="view active">
+      <div class="card join-card">
+        <div class="logo">
+          <span class="logo-mark">⬡</span>
+          <h1>HiveDrop</h1>
+        </div>
+        <p class="tagline">
+          Free website for <strong>same Wi‑Fi</strong> chat &amp; file share.<br />
+          Open link → scan QR → connect. No app install.
+        </p>
+
+        <label class="lbl" for="nameInput">Your name</label>
+        <input id="nameInput" class="inp" maxlength="24" placeholder="e.g. Arun" autocomplete="nickname" />
+
+        <label class="lbl" for="roomInput">Room code</label>
+        <div class="row">
+          <input id="roomInput" class="inp mono" maxlength="8" placeholder="AUTO or type code" spellcheck="false" />
+          <button type="button" id="btnRandomRoom" class="btn ghost" title="New code">↻</button>
+        </div>
+
+        <button type="button" id="btnJoin" class="btn primary block">
+          Enter hive <span>→</span>
+        </button>
+
+        <div class="tips">
+          <div class="tip"><span>①</span> Host opens site &amp; enters room</div>
+          <div class="tip"><span>②</span> Show QR — others scan on same Wi‑Fi</div>
+          <div class="tip"><span>③</span> Chat + drag files to anyone</div>
+        </div>
+        <p class="fine">Signaling uses free PeerJS cloud (needs internet once). File &amp; chat data go peer‑to‑peer — prefers LAN.</p>
+      </div>
+    </section>
+
+    <!-- ROOM -->
+    <section id="view-room" class="view">
+      <header class="bar">
+        <div class="bar-left">
+          <span class="logo-sm">⬡</span>
+          <strong>HiveDrop</strong>
+          <span id="roomBadge" class="badge mono">————</span>
+          <span id="roleBadge" class="badge soft">…</span>
+        </div>
+        <div class="bar-right">
+          <button type="button" id="btnQr" class="btn icon" title="QR code">QR</button>
+          <button type="button" id="btnCopy" class="btn icon" title="Copy link">⧉</button>
+          <button type="button" id="btnLeave" class="btn ghost sm">Leave</button>
+        </div>
+      </header>
+
+      <div class="room-grid">
+        <!-- Peers -->
+        <aside class="panel peers-panel">
+          <div class="panel-h">
+            <h2>Online</h2>
+            <span id="peerCount" class="count">0</span>
+          </div>
+          <ul id="peerList" class="peer-list"></ul>
+          <p id="youLine" class="you-line">You</p>
+        </aside>
+
+        <!-- Chat -->
+        <main class="panel chat-panel">
+          <div id="chatLog" class="chat-log" aria-live="polite"></div>
+          <div class="composer">
+            <input id="chatInput" class="inp" type="text" placeholder="Message the hive…" maxlength="4000" autocomplete="off" />
+            <button type="button" id="btnSendChat" class="btn primary">Send</button>
+          </div>
+        </main>
+
+        <!-- Files -->
+        <aside class="panel files-panel">
+          <div class="panel-h">
+            <h2>Files</h2>
+          </div>
+          <div id="dropZone" class="drop" tabindex="0">
+            <div>
+              <div class="drop-ico">⬆</div>
+              <strong>Drop files</strong>
+              <p>or tap to choose</p>
+            </div>
+            <input type="file" id="fileInput" multiple hidden />
+          </div>
+          <p id="sendTargetHint" class="hint-sm">Select a person (or All) then send</p>
+          <div class="send-row">
+            <select id="sendTarget" class="inp select">
+              <option value="*">Everyone</option>
+            </select>
+            <button type="button" id="btnSendFiles" class="btn secondary" disabled>Send files</button>
+          </div>
+          <div id="fileQueue" class="file-queue"></div>
+          <div id="transferList" class="transfer-list"></div>
+        </aside>
+      </div>
+    </section>
+  </div>
+
+  <!-- QR Modal -->
+  <div id="qrModal" class="modal hidden">
+    <div class="modal-bg" data-close></div>
+    <div class="modal-card">
+      <button type="button" class="x" data-close aria-label="Close">×</button>
+      <h2>Scan to join</h2>
+      <p class="sub">Same Wi‑Fi · open camera · scan</p>
+      <canvas id="qrCanvas" width="280" height="280"></canvas>
+      <p id="joinUrl" class="join-url mono"></p>
+      <div class="modal-actions">
+        <button type="button" id="btnCopyModal" class="btn secondary">Copy link</button>
+        <button type="button" class="btn primary" data-close>Done</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts"></div>
+  <div id="statusDot" class="status-dot" title="Connection"></div>
+
+  <!-- libs: PeerJS + QR -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
