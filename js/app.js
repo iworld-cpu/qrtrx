@@ -119,6 +119,8 @@
     chatPartnerName: '',
     msgStatus: new Map(), // mid -> 'sent'|'delivered'|'seen'
     outgoingMids: new Map(), // mid -> { el, status }
+    displayedMids: new Set(), // prevent double-render (PeerJS + MQTT)
+    sendLock: false,
   };
 
   function loadGroups() {
@@ -329,9 +331,38 @@
     return '<span class="ticks read" title="Seen">✓✓</span>';
   }
 
-  function addChat({ name, text, me, file, mid, status }) {
+  function playMsgSound() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(880, ctx.currentTime);
+      o.frequency.exponentialRampToValueAtTime(660, ctx.currentTime + 0.08);
+      g.gain.setValueAtTime(0.0001, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.22);
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start();
+      o.stop(ctx.currentTime + 0.25);
+      setTimeout(() => { try { ctx.close(); } catch {} }, 400);
+    } catch {}
+  }
+
+  function addChat({ name, text, me, file, mid, status, silent }) {
+    // Deduplicate: same mid only once (fixes 1 msg → 2 bubbles)
+    if (mid) {
+      if (state.displayedMids.has(mid)) return null;
+      state.displayedMids.add(mid);
+      if (state.displayedMids.size > 300) {
+        state.displayedMids = new Set([...state.displayedMids].slice(-150));
+      }
+    }
     const d = document.createElement('div');
-    d.className = `msg ${me ? 'me' : 'them'}${file ? ' file-msg' : ''}`;
+    d.className = `msg ${me ? 'me' : 'them'}${file ? ' file-msg' : ''} msg-anim`;
     if (mid) d.dataset.mid = mid;
     const body = file
       ? `📎 <a href="${file.url}" download="${escapeHtml(file.name)}">${escapeHtml(file.name)}</a>
@@ -350,6 +381,10 @@
     if (me && mid) {
       state.outgoingMids.set(mid, { el: d, status: status || 'sent' });
       state.msgStatus.set(mid, status || 'sent');
+    }
+    if (!me && !silent) {
+      playMsgSound();
+      try { navigator.vibrate?.(50); } catch {}
     }
     return d;
   }
@@ -825,6 +860,11 @@
   function sendChat() {
     const text = el.chatInput.value.trim();
     if (!text) return;
+    // Prevent double-fire (click + enter, or double bind)
+    if (state.sendLock) return;
+    state.sendLock = true;
+    setTimeout(() => { state.sendLock = false; }, 350);
+
     const mid = newMid();
     const fromName = state.name || loadName() || 'Someone';
     const payload = {
@@ -837,11 +877,15 @@
       room: state.room,
       ts: Date.now()
     };
-    broadcast(payload);
+    // Local bubble once
     addChat({ name: fromName, text, me: true, mid, status: 'sent' });
     el.chatInput.value = '';
-    mqttRelayChat(text, state.chatPartnerName || '', mid);
-    // group topic
+
+    // Transport: PeerJS mesh
+    broadcast(payload);
+
+    // MQTT: ONE channel only (avoid double receive)
+    // groups → group topic; 1:1 → presence chat-relay
     if (state.isGroup && state.room) {
       ensureMqtt(() => {
         try {
@@ -856,6 +900,8 @@
           }), { qos: 0 });
         } catch {}
       });
+    } else {
+      mqttRelayChat(text, state.chatPartnerName || '', mid);
     }
   }
 
@@ -1118,6 +1164,7 @@
     renderQueue();
     el.chatLog.innerHTML = '';
     state.outgoingMids.clear();
+    state.displayedMids.clear();
     addSystem(state.isGroup
       ? `Group “${state.groupName || state.room}” · members can chat & share files`
       : (state.isHost ? `Chat ready · share QR / wait for join` : `Joined · say hi 👋`));
