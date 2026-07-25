@@ -23,8 +23,14 @@
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
   const el = {
+    viewRegister: $('#view-register'),
     viewJoin: $('#view-join'),
     viewRoom: $('#view-room'),
+    regNameInput: $('#regNameInput'),
+    btnRegister: $('#btnRegister'),
+    btnLogout: $('#btnLogout'),
+    meNameLabel: $('#meNameLabel'),
+    btnRefreshHome: $('#btnRefreshHome'),
     nameInput: $('#nameInput'),
     roomInput: $('#roomInput'),
     btnRandomRoom: $('#btnRandomRoom'),
@@ -71,6 +77,9 @@
     tabLive: $('#tabLive'),
     toasts: $('#toasts'),
     statusDot: $('#statusDot'),
+    homePeopleList: $('#homePeopleList'),
+    homePeopleCount: $('#homePeopleCount'),
+    presenceHint: $('#presenceHint'),
   };
 
   const state = {
@@ -188,13 +197,63 @@
   }
 
   // ── UI ─────────────────────────────────────────────────
+  function hideAllViews() {
+    el.viewRegister?.classList.remove('active');
+    el.viewJoin?.classList.remove('active');
+    el.viewRoom?.classList.remove('active');
+  }
+  function showRegister() {
+    hideAllViews();
+    el.viewRegister?.classList.add('active');
+  }
   function showJoin() {
-    el.viewJoin.classList.add('active');
-    el.viewRoom.classList.remove('active');
+    hideAllViews();
+    el.viewJoin?.classList.add('active');
+    if (el.meNameLabel) el.meNameLabel.textContent = state.name || loadName() || '—';
+    if (el.nameInput && state.name) el.nameInput.value = state.name;
+    renderNearbyList();
   }
   function showRoom() {
-    el.viewJoin.classList.remove('active');
-    el.viewRoom.classList.add('active');
+    hideAllViews();
+    el.viewRoom?.classList.add('active');
+  }
+
+  /** Shared private room id for two users (same code both sides) */
+  function pairRoomCode(idA, idB) {
+    const s = [String(idA), String(idB)].sort().join('|');
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let out = '';
+    let x = h >>> 0;
+    for (let i = 0; i < 6; i++) {
+      out += chars[x % chars.length];
+      x = Math.floor(x / chars.length) ^ (h >>> (i * 3));
+    }
+    return out;
+  }
+
+  function registerUsername(raw) {
+    const name = String(raw || '').trim().slice(0, 24);
+    if (name.length < 1) {
+      toast('Username type pannunga', 'err');
+      el.regNameInput?.focus();
+      return false;
+    }
+    state.name = name;
+    saveName(name);
+    if (el.nameInput) el.nameInput.value = name;
+    if (el.meNameLabel) el.meNameLabel.textContent = name;
+    ensureMqtt();
+    publishPresence(true);
+    startPresenceLoop();
+    showJoin();
+    updatePresenceHint();
+    toast(`Hi ${name} · nearby users loading…`, 'ok');
+    return true;
   }
 
   function addSystem(text) {
@@ -919,16 +978,13 @@
   }
 
   function personRowHtml(p, me) {
-    const age = Math.max(0, Math.round((Date.now() - p.ts) / 1000));
-    const st = p.room
-      ? `<span class="st-room">Room ${escapeHtml(p.room)}</span>`
-      : `<span class="st-online">Online</span>`;
-    const chip = me ? 'You' : (p.room ? 'Join →' : 'Invite');
-    return `<li class="nearby-item${me ? ' me-item' : ''}" data-id="${escapeHtml(p.id)}" data-room="${escapeHtml(p.room || '')}" data-name="${escapeHtml(p.name)}">
+    // Username-only list (user request)
+    const chip = me ? 'You' : 'Chat →';
+    return `<li class="nearby-item${me ? ' me-item' : ''}" data-id="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name)}">
       <div class="av">${escapeHtml(initials(p.name))}</div>
       <div class="meta">
         <div class="nm">${escapeHtml(p.name)}${me ? ' (you)' : ''}</div>
-        <div class="rm">${st} · ${age}s</div>
+        <div class="rm"><span class="st-online">● Online</span></div>
       </div>
       <span class="join-chip">${chip}</span>
     </li>`;
@@ -939,62 +995,70 @@
     root.querySelectorAll('.nearby-item').forEach((item) => {
       item.addEventListener('click', () => {
         if (item.classList.contains('me-item')) return;
-        const room = item.dataset.room;
         const id = item.dataset.id;
         const name = item.dataset.name || 'User';
-        if (room) joinRoomCode(room);
-        else invitePerson(id, name);
+        // Always open 1:1 chat with this username
+        connectToUser(id, name);
       });
     });
   }
 
   function renderNearbyList() {
     prunePeople();
-    const myName = (state.name || el.nameInput?.value || '').trim();
+    const myName = (state.name || loadName() || el.nameInput?.value || '').trim();
     if (myName) {
       upsertPerson({
         id: getPresenceId(),
         name: myName,
         room: state.room || '',
-        status: state.room ? 'room' : 'online',
+        status: state.room ? 'busy' : 'online',
         ts: Date.now()
       });
     }
 
-    const people = [...state.nearbyPeople.values()].sort((a, b) => {
+    // Dedupe by username (keep freshest)
+    const byName = new Map();
+    for (const p of state.nearbyPeople.values()) {
+      const key = p.name.toLowerCase();
+      const prev = byName.get(key);
+      if (!prev || p.ts > prev.ts) byName.set(key, p);
+    }
+    const unique = [...byName.values()];
+
+    const people = unique.sort((a, b) => {
       if (a.id === getPresenceId()) return -1;
       if (b.id === getPresenceId()) return 1;
-      if (a.room && !b.room) return -1;
-      if (!a.room && b.room) return 1;
+      if (a.name.toLowerCase() === myName.toLowerCase() && a.id === getPresenceId()) return -1;
       return a.name.localeCompare(b.name);
     });
 
-    const others = people.filter((p) => p.id !== getPresenceId());
+    const others = people.filter((p) => p.id !== getPresenceId() && p.name.toLowerCase() !== myName.toLowerCase());
+
     if (el.nearbyStatus) {
       el.nearbyStatus.textContent = state.mqttReady
-        ? `${people.length} online · ${others.length} other`
-        : 'Connecting presence…';
+        ? `${others.length} user${others.length === 1 ? '' : 's'} nearby`
+        : 'Connecting…';
     }
 
     if (el.nearbyList) {
-      if (!people.length) {
-        el.nearbyList.innerHTML = '<li class="nearby-empty">No one yet.<br/>Both devices: open site → type name → wait 2 sec</li>';
+      if (!others.length) {
+        el.nearbyList.innerHTML = '<li class="nearby-empty">No other users yet.<br/>Friends: open site → register username</li>';
       } else {
-        el.nearbyList.innerHTML = people.map((p) => personRowHtml(p, p.id === getPresenceId())).join('');
+        el.nearbyList.innerHTML = others.map((p) => personRowHtml(p, false)).join('');
         bindPeopleClicks(el.nearbyList);
       }
     }
 
-    const homeList = $('#homePeopleList');
-    const homeCount = $('#homePeopleCount');
+    const homeList = el.homePeopleList || $('#homePeopleList');
+    const homeCount = el.homePeopleCount || $('#homePeopleCount');
     if (homeCount) homeCount.textContent = String(others.length);
     if (homeList) {
       if (!myName) {
-        homeList.innerHTML = '<li class="nearby-empty">Type your name to see people…</li>';
+        homeList.innerHTML = '<li class="nearby-empty">Register username first</li>';
+      } else if (!state.mqttReady) {
+        homeList.innerHTML = '<li class="nearby-empty">Connecting…</li>';
       } else if (!others.length) {
-        homeList.innerHTML = state.mqttReady
-          ? '<li class="nearby-empty">You are online. Waiting for others…</li>'
-          : '<li class="nearby-empty">Connecting…</li>';
+        homeList.innerHTML = '<li class="nearby-empty">You are online 🟢<br/><br/>Other people register username<br/>then they appear here</li>';
       } else {
         homeList.innerHTML = others.map((p) => personRowHtml(p, false)).join('');
         bindPeopleClicks(homeList);
@@ -1028,17 +1092,17 @@
     }
   }
 
-  function invitePerson(toId, toName) {
-    const myName = (el.nameInput.value || state.name || loadName() || '').trim();
+  function connectToUser(toId, toName) {
+    const myName = (state.name || loadName() || el.nameInput?.value || '').trim();
     if (!myName) {
-      toast('Type your name first', 'err');
-      el.nameInput?.focus();
+      showRegister();
+      toast('Username register pannunga', 'err');
       return;
     }
-    // Create / use a room then invite them
-    let room = (el.roomInput.value || state.room || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
-    if (!room) room = randomRoom();
-    el.roomInput.value = room;
+    // Deterministic private room between the two users
+    const room = pairRoomCode(getPresenceId(), toId);
+    if (el.roomInput) el.roomInput.value = room;
+    if (el.nameInput) el.nameInput.value = myName;
 
     const payload = {
       t: 'invite',
@@ -1051,25 +1115,31 @@
 
     ensureMqtt(() => {
       try {
-        state.mqtt.publish(
-          `${PRESENCE_TOPIC}/invite/${toId}`,
-          JSON.stringify(payload),
-          { qos: 0 }
-        );
-        // also general channel for older clients
+        state.mqtt.publish(`${PRESENCE_TOPIC}/invite/${toId}`, JSON.stringify(payload), { qos: 0 });
         state.mqtt.publish(PRESENCE_TOPIC, JSON.stringify({ ...payload, t: 'invite-broadcast' }), { qos: 0 });
       } catch (e) {
         console.warn(e);
       }
-      toast(`Invite sent to ${toName}`, 'ok');
-      // Host joins the room so friend can enter
-      if (!state.room) {
-        closeNearby();
-        setTimeout(() => el.btnJoin.click(), 200);
-      } else if (state.room !== room) {
-        joinRoomCode(room);
-      }
     });
+
+    toast(`Connecting to ${toName}…`, 'ok');
+    closeNearby();
+    // Join as host if free, else client
+    if (state.peer && state.room === room) {
+      toast(`Already chatting`, 'ok');
+      return;
+    }
+    if (state.peer && state.room && state.room !== room) {
+      leave();
+      setTimeout(() => enterRoom(myName, room), 350);
+    } else {
+      enterRoom(myName, room);
+    }
+  }
+
+  // back-compat name
+  function invitePerson(toId, toName) {
+    connectToUser(toId, toName);
   }
 
   function presencePayload() {
@@ -1123,19 +1193,19 @@
   }
 
   function updatePresenceHint() {
-    const hint = $('#presenceHint');
+    const hint = el.presenceHint || $('#presenceHint');
     if (!hint) return;
-    const name = (el.nameInput?.value || '').trim();
+    const name = (state.name || loadName() || el.nameInput?.value || '').trim();
     if (!name) {
-      hint.textContent = 'Type name → you appear in Nearby for others';
+      hint.textContent = 'Offline';
       hint.classList.add('off');
       return;
     }
     if (state.mqttReady) {
-      hint.textContent = `Online as “${name}” · others can see you in Nearby`;
+      hint.textContent = 'Online';
       hint.classList.remove('off');
     } else {
-      hint.textContent = `Connecting as “${name}”…`;
+      hint.textContent = 'Connecting…';
       hint.classList.add('off');
     }
   }
@@ -1516,36 +1586,59 @@
   }
 
   function bind() {
-    el.nameInput.value = loadName();
-    el.roomInput.value = roomFromUrl() || '';
+    const saved = loadName();
+    if (el.nameInput) el.nameInput.value = saved;
+    if (el.regNameInput) el.regNameInput.value = saved;
+    if (el.roomInput) el.roomInput.value = roomFromUrl() || '';
 
-    el.btnRandomRoom.addEventListener('click', () => {
+    el.btnRegister?.addEventListener('click', () => {
+      registerUsername(el.regNameInput?.value);
+    });
+    el.regNameInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') registerUsername(el.regNameInput.value);
+    });
+    el.btnLogout?.addEventListener('click', () => {
+      try { localStorage.removeItem('hivedrop_name'); } catch {}
+      state.name = '';
+      stopPresenceLoop();
+      showRegister();
+    });
+    el.btnRefreshHome?.addEventListener('click', () => {
+      publishPresence(true);
+      prunePeople();
+      renderNearbyList();
+      toast('Refreshed', 'ok');
+    });
+
+    el.btnRandomRoom?.addEventListener('click', () => {
       el.roomInput.value = randomRoom();
       el.roomInput.focus();
     });
 
-    el.btnJoin.addEventListener('click', () => {
-      const name = (el.nameInput.value || 'Guest').trim().slice(0, 24);
-      let room = (el.roomInput.value || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+    el.btnJoin?.addEventListener('click', () => {
+      const name = (el.nameInput?.value || state.name || loadName() || 'Guest').trim().slice(0, 24);
+      let room = (el.roomInput?.value || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
       if (!room) room = randomRoom();
-      el.roomInput.value = room;
+      if (el.roomInput) el.roomInput.value = room;
       if (!window.Peer) {
         toast('PeerJS failed to load — check internet', 'err');
         return;
       }
+      state.name = name;
+      saveName(name);
       enterRoom(name, room);
     });
 
-    // Name type → appear in Nearby people list
-    el.nameInput.addEventListener('input', onNameTyped);
-    el.nameInput.addEventListener('change', onNameTyped);
-    el.nameInput.addEventListener('blur', onNameTyped);
-    el.nameInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') el.btnJoin.click();
+    // Keep advanced name field in sync
+    el.nameInput?.addEventListener('input', onNameTyped);
+    el.nameInput?.addEventListener('change', onNameTyped);
+    el.nameInput?.addEventListener('blur', onNameTyped);
+    el.nameInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') el.btnJoin?.click();
     });
-    el.roomInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') el.btnJoin.click(); });
+    el.roomInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') el.btnJoin?.click(); });
 
-    el.btnLeave.addEventListener('click', leave);
+    el.btnLeave?.addEventListener('click', leave);
     el.btnQr.addEventListener('click', openQr);
     el.btnCopy.addEventListener('click', copyLink);
     el.btnCopyModal.addEventListener('click', copyLink);
@@ -1631,17 +1724,26 @@
     });
   }
 
-  // Auto-join if room in URL + name saved
+  // Boot: register once → home nearby users
   bind();
-  // Always spin up presence early
-  setTimeout(() => {
-    if (loadName()) onNameTyped();
-    else ensureMqtt(); // connect so we at least receive others if name typed later
-  }, 200);
-  if (roomFromUrl() && loadName() && window.Peer) {
-    el.roomInput.value = roomFromUrl();
-    setTimeout(() => el.btnJoin.click(), 500);
-  } else if (roomFromUrl()) {
+  const bootName = loadName();
+  if (bootName) {
+    state.name = bootName;
+    showJoin();
+    setTimeout(() => {
+      ensureMqtt();
+      publishPresence(true);
+      startPresenceLoop();
+      updatePresenceHint();
+    }, 200);
+  } else {
+    showRegister();
+  }
+
+  if (roomFromUrl() && bootName && window.Peer) {
+    if (el.roomInput) el.roomInput.value = roomFromUrl();
+    setTimeout(() => el.btnJoin?.click(), 600);
+  } else if (roomFromUrl() && el.roomInput) {
     el.roomInput.value = roomFromUrl();
   }
 })();

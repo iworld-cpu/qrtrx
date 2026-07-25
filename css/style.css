@@ -114,24 +114,59 @@ body {
   margin: 6px 0 0; min-height: 1.2em; opacity: 0.95;
 }
 .presence-hint.off { color: var(--dim); }
-.home-people {
-  margin-top: 14px; text-align: left; border: 1px solid var(--border);
-  border-radius: 12px; background: rgba(0,0,0,0.28); padding: 10px;
-  max-height: 180px; overflow: hidden; display: flex; flex-direction: column;
+.presence-hint.inline {
+  margin: 0; font-size: 0.72rem; margin-left: auto; text-align: right;
 }
+.home-card { text-align: left; padding-top: 22px; }
+.home-top {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;
+}
+.logo.small h1 { font-size: 1.25rem; }
+.logo.small .logo-mark { font-size: 1.3rem; }
+.me-chip {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 12px; border-radius: 12px; margin-bottom: 12px;
+  background: rgba(52, 211, 153, 0.08); border: 1px solid rgba(52, 211, 153, 0.22);
+  font-size: 0.9rem;
+}
+.me-chip .dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--dim);
+}
+.me-chip .dot.on { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+.home-people {
+  margin-top: 4px; text-align: left; border: 1px solid var(--border);
+  border-radius: 14px; background: rgba(0,0,0,0.28); padding: 12px;
+  display: flex; flex-direction: column; min-height: 220px;
+}
+.home-people.big { min-height: min(52vh, 420px); max-height: min(58vh, 480px); }
 .home-people-h {
   display: flex; justify-content: space-between; align-items: center;
   font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.08em; color: var(--muted); margin-bottom: 8px;
+  letter-spacing: 0.08em; color: var(--muted); margin-bottom: 10px;
 }
+.home-people-actions { display: flex; align-items: center; gap: 8px; }
 .home-people-list {
-  list-style: none; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 6px;
-  max-height: 130px;
+  list-style: none; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 8px;
 }
-.home-people-list .nearby-item { padding: 8px 10px; }
+.home-people-list .nearby-item {
+  padding: 12px 12px; cursor: pointer;
+}
+.home-people-list .nearby-item:active { transform: scale(0.99); }
 .home-people-list .nearby-empty {
-  text-align: center; color: var(--dim); font-size: 0.8rem; padding: 12px 6px;
+  text-align: center; color: var(--dim); font-size: 0.88rem; padding: 36px 12px; line-height: 1.5;
 }
+.user-only .rm { display: none; } /* optional hide status line later */
+.advanced {
+  margin-top: 16px; border-top: 1px solid var(--border); padding-top: 10px;
+  color: var(--dim); font-size: 0.85rem;
+}
+.advanced summary {
+  cursor: pointer; color: var(--muted); font-weight: 600; padding: 6px 0;
+  list-style: none;
+}
+.advanced summary::-webkit-details-marker { display: none; }
+.advanced[open] summary { margin-bottom: 10px; color: var(--accent); }
+.btn.xs { padding: 4px 8px; font-size: 0.72rem; }
 .nearby-item .st-online { color: var(--ok); }
 .nearby-item .st-room { color: var(--accent); }
 .nearby-item.me-item { opacity: 0.75; border-style: dashed; }
