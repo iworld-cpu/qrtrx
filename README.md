@@ -1,8 +1,19 @@
-# ⬡ HiveDrop
+# ⬡ HiveDrop (qrtrx)
+
+**Repo:** https://github.com/iworld-cpu/qrtrx  
 
 **Free website** for same‑Wi‑Fi **chat + file share**.  
 Open in browser → show **QR** → friends scan → message & transfer.  
 **No app install.** Host for free on **GitHub Pages**.
+
+### Live site (after Pages is on)
+
+```text
+https://iworld-cpu.github.io/qrtrx/
+```
+
+> Repo must be **Public** for free GitHub Pages.  
+> Settings → Pages → Branch `main` / `/ (root)` → Save.
 
 ## Features
 
