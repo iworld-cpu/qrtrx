@@ -8,15 +8,39 @@
   const CHUNK = 16 * 1024; // 16 KB
   const MAX_FILE = 200 * 1024 * 1024; // 200 MB soft cap per file
   const PEER_PREFIX = 'hivedrop-';
-  const NEARBY_TTL_MS = 45_000;
+  const NEARBY_TTL_MS = 90_000;
   const PRESENCE_TOPIC = 'qrtrx/v1/presence';
   const MQTT_URLS = [
     'wss://broker.emqx.io:8084/mqtt',
-    'wss://broker.hivemq.com:8884/mqtt'
+    'wss://broker.hivemq.com:8884/mqtt',
+    'wss://test.mosquitto.org:8081'
+  ];
+  const MQTT_SCRIPT_URLS = [
+    'https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js',
+    'https://unpkg.com/mqtt@4.3.7/dist/mqtt.min.js',
+    'https://cdn.jsdelivr.net/npm/mqtt@4.3.7/dist/mqtt.min.js'
   ];
 
   function getMqttLib() {
     return window.mqtt || globalThis.mqtt || null;
+  }
+
+  function loadMqttScript() {
+    return new Promise((resolve) => {
+      if (getMqttLib()) return resolve(getMqttLib());
+      let i = 0;
+      const next = () => {
+        if (i >= MQTT_SCRIPT_URLS.length) return resolve(null);
+        const url = MQTT_SCRIPT_URLS[i++];
+        const s = document.createElement('script');
+        s.src = url;
+        s.async = true;
+        s.onload = () => resolve(getMqttLib());
+        s.onerror = () => next();
+        document.head.appendChild(s);
+      };
+      next();
+    });
   }
 
   const $ = (s, r = document) => r.querySelector(s);
@@ -1340,15 +1364,17 @@
 
   function upsertPerson(p) {
     if (!p?.id || !p?.name) return;
+    // ignore ourselves handled in list; still store for count
     const name = String(p.name).trim().slice(0, 24);
     if (!name || name.includes('undefined')) return;
     const room = sanitizeRoom(p.room);
+    // IMPORTANT: use local receive time for TTL (remote clocks break nearby)
     state.nearbyPeople.set(p.id, {
       id: p.id,
       name,
       room,
       status: room ? 'room' : (p.status || 'online'),
-      ts: p.ts || Date.now()
+      ts: Date.now()
     });
   }
 
@@ -1681,7 +1707,7 @@
       updatePresenceHint();
       return;
     }
-    // Local self immediately
+    // Local self immediately (list filter still hides self)
     upsertPerson(payload);
     renderNearbyList();
     updatePresenceHint();
@@ -1689,20 +1715,43 @@
     ensureMqtt(() => {
       if (!state.mqtt || !state.mqttReady) return;
       try {
-        state.mqtt.publish(PRESENCE_TOPIC, JSON.stringify(payload), { qos: 0 });
+        // qos 0 fire-and-forget; publish twice for flaky mobile nets
+        const raw = JSON.stringify(payload);
+        state.mqtt.publish(PRESENCE_TOPIC, raw, { qos: 0 });
+        setTimeout(() => {
+          try { if (state.mqttReady) state.mqtt.publish(PRESENCE_TOPIC, raw, { qos: 0 }); } catch {}
+        }, 400);
       } catch (e) {
         console.warn('publish presence', e);
       }
     });
   }
 
+  function askWhoIsOnline() {
+    ensureMqtt(() => {
+      if (!state.mqtt || !state.mqttReady) return;
+      try {
+        state.mqtt.publish(PRESENCE_TOPIC, JSON.stringify({
+          t: 'who',
+          fromId: getPresenceId(),
+          ts: Date.now()
+        }), { qos: 0 });
+      } catch {}
+    });
+  }
+
   function startPresenceLoop() {
     if (state.presenceTimer) return;
+    // Fast heartbeat — nearby feels live
     state.presenceTimer = setInterval(() => {
       publishPresence();
       prunePeople();
       renderNearbyList();
-    }, 5000);
+    }, 3000);
+    // periodic who scan
+    setInterval(() => {
+      if (state.mqttReady) askWhoIsOnline();
+    }, 8000);
   }
 
   function stopPresenceLoop() {
@@ -1722,150 +1771,169 @@
       return;
     }
     if (state.mqttReady) {
-      hint.textContent = 'Online';
+      const n = [...state.nearbyPeople.values()].filter(
+        (p) => p.id !== getPresenceId() && p.name.toLowerCase() !== name.toLowerCase()
+      ).length;
+      hint.textContent = n ? `Online · ${n} nearby` : 'Online · scanning…';
       hint.classList.remove('off');
     } else {
-      hint.textContent = 'Connecting…';
+      hint.textContent = 'Connecting nearby…';
       hint.classList.add('off');
     }
   }
 
+  let mqttBooting = false;
+  const mqttWaiters = [];
+
   function ensureMqtt(cb) {
-    if (state.mqtt && state.mqttReady) {
-      if (typeof cb === 'function') cb();
-      return;
-    }
-    if (state.mqtt && !state.mqttReady) {
-      // wait a bit
-      if (typeof cb === 'function') {
-        const t0 = Date.now();
-        const wait = setInterval(() => {
-          if (state.mqttReady) {
-            clearInterval(wait);
-            cb();
-          } else if (Date.now() - t0 > 8000) {
-            clearInterval(wait);
-          }
-        }, 200);
-      }
-      return;
-    }
+    if (typeof cb === 'function') mqttWaiters.push(cb);
 
-    const M = getMqttLib();
-    if (!M || typeof M.connect !== 'function') {
-      if (el.nearbyStatus) el.nearbyStatus.textContent = 'MQTT lib missing — hard refresh (Ctrl+F5)';
-      console.warn('mqtt.js not loaded', M);
-      toast('Nearby library failed — refresh page', 'err');
-      return;
-    }
-
-    const pid = getPresenceId();
-    let urlIndex = 0;
-    let connecting = false;
-
-    const connectNext = () => {
-      if (connecting) return;
-      if (urlIndex >= MQTT_URLS.length) {
-        if (el.nearbyStatus) el.nearbyStatus.textContent = 'Presence offline — try Refresh';
-        state.mqttReady = false;
-        updatePresenceHint();
-        // retry from first broker after pause
-        setTimeout(() => {
-          urlIndex = 0;
-          connectNext();
-        }, 5000);
-        return;
-      }
-      const url = MQTT_URLS[urlIndex++];
-      connecting = true;
-      try {
-        if (state.mqtt) {
-          try { state.mqtt.end(true); } catch {}
-          state.mqtt = null;
-        }
-        const client = M.connect(url, {
-          clientId: 'qrtrx_' + pid + '_' + Math.random().toString(16).slice(2, 6),
-          clean: true,
-          connectTimeout: 10000,
-          reconnectPeriod: 5000,
-          keepalive: 20
-        });
-        state.mqtt = client;
-
-        client.on('connect', () => {
-          connecting = false;
-          state.mqttReady = true;
-          if (el.nearbyStatus) el.nearbyStatus.textContent = 'Presence online';
-          try {
-            client.subscribe(PRESENCE_TOPIC, { qos: 0 });
-            client.subscribe(PRESENCE_TOPIC + '/invite/' + pid, { qos: 0 });
-            // username channel so invites open by name even if peer id differs
-            const uname = String(state.name || loadName() || '')
-              .trim().toLowerCase().replace(/\s+/g, '_').slice(0, 32);
-            if (uname) {
-              client.subscribe(PRESENCE_TOPIC + '/user/' + uname, { qos: 0 });
-            }
-          } catch (e) {
-            console.warn(e);
-          }
-          // Request isn't needed — just spam our presence so others see us
-          publishPresence(true);
-          startPresenceLoop();
-          updatePresenceHint();
-          renderNearbyList();
-          if (typeof cb === 'function') {
-            const fn = cb;
-            cb = null;
-            fn();
-          }
-        });
-
-        client.on('message', (topic, buf) => {
-          let data;
-          try { data = JSON.parse(String(buf)); } catch { return; }
-          onMqttMessage(topic, data);
-        });
-
-        client.on('error', (err) => {
-          console.warn('mqtt error', err);
-        });
-
-        client.on('close', () => {
-          state.mqttReady = false;
-          updatePresenceHint();
-        });
-
-        client.on('offline', () => {
-          state.mqttReady = false;
-        });
-
-        // if not connected soon, try next broker
-        setTimeout(() => {
-          if (!state.mqttReady && state.mqtt === client) {
-            connecting = false;
-            try { client.end(true); } catch {}
-            connectNext();
-          } else {
-            connecting = false;
-          }
-        }, 10000);
-      } catch (e) {
-        connecting = false;
-        console.warn(e);
-        connectNext();
+    const flushWaiters = () => {
+      while (mqttWaiters.length) {
+        try { mqttWaiters.shift()(); } catch (e) { console.warn(e); }
       }
     };
 
-    connectNext();
+    if (state.mqtt && state.mqttReady) {
+      flushWaiters();
+      return;
+    }
+    if (mqttBooting) return;
+    mqttBooting = true;
+
+    const startConnect = (M) => {
+      if (!M || typeof M.connect !== 'function') {
+        mqttBooting = false;
+        if (el.nearbyStatus) el.nearbyStatus.textContent = 'Nearby offline — refresh page';
+        toast('Nearby connect fail — internet / refresh', 'err');
+        updatePresenceHint();
+        // retry load later
+        setTimeout(() => { mqttBooting = false; ensureMqtt(); }, 5000);
+        return;
+      }
+
+      const pid = getPresenceId();
+      let urlIndex = 0;
+
+      const connectNext = () => {
+        if (urlIndex >= MQTT_URLS.length) {
+          state.mqttReady = false;
+          mqttBooting = false;
+          if (el.nearbyStatus) el.nearbyStatus.textContent = 'Nearby offline — tap Refresh';
+          updatePresenceHint();
+          setTimeout(() => ensureMqtt(), 4000);
+          return;
+        }
+        const url = MQTT_URLS[urlIndex++];
+        try {
+          if (state.mqtt) {
+            try { state.mqtt.removeAllListeners?.(); state.mqtt.end(true); } catch {}
+            state.mqtt = null;
+          }
+          const client = M.connect(url, {
+            clientId: 'qrtrx_' + String(pid).replace(/[^a-zA-Z0-9]/g, '').slice(0, 12) + '_' + Math.random().toString(16).slice(2, 6),
+            clean: true,
+            connectTimeout: 12000,
+            reconnectPeriod: 0, // we handle reconnect
+            keepalive: 15,
+            protocolVersion: 4
+          });
+          state.mqtt = client;
+          let settled = false;
+
+          const ok = () => {
+            if (settled) return;
+            settled = true;
+            mqttBooting = false;
+            state.mqttReady = true;
+            if (el.nearbyStatus) el.nearbyStatus.textContent = 'Nearby online';
+            try {
+              client.subscribe(PRESENCE_TOPIC, { qos: 0 });
+              client.subscribe(PRESENCE_TOPIC + '/invite/' + pid, { qos: 0 });
+              const uname = String(state.name || loadName() || '')
+                .trim().toLowerCase().replace(/\s+/g, '_').slice(0, 32);
+              if (uname) client.subscribe(PRESENCE_TOPIC + '/user/' + uname, { qos: 0 });
+            } catch (e) { console.warn(e); }
+
+            // Announce + ask who is online
+            publishPresence(true);
+            setTimeout(askWhoIsOnline, 300);
+            setTimeout(publishPresence, 800);
+            startPresenceLoop();
+            updatePresenceHint();
+            renderNearbyList();
+            flushWaiters();
+          };
+
+          client.on('connect', ok);
+          // some brokers fire 'connect' late — also listen packetconnect
+          client.on('packetreceive', () => {});
+
+          client.on('message', (topic, buf) => {
+            let data;
+            try {
+              data = JSON.parse(typeof buf === 'string' ? buf : buf.toString('utf8'));
+            } catch { return; }
+            onMqttMessage(topic, data);
+          });
+
+          client.on('error', (err) => {
+            console.warn('mqtt error', url, err?.message || err);
+          });
+
+          client.on('close', () => {
+            if (state.mqtt === client) {
+              state.mqttReady = false;
+              updatePresenceHint();
+            }
+          });
+
+          client.on('offline', () => {
+            if (state.mqtt === client) state.mqttReady = false;
+          });
+
+          setTimeout(() => {
+            if (!settled) {
+              try { client.end(true); } catch {}
+              if (state.mqtt === client) state.mqtt = null;
+              connectNext();
+            }
+          }, 11000);
+        } catch (e) {
+          console.warn(e);
+          connectNext();
+        }
+      };
+
+      connectNext();
+    };
+
+    // Ensure library then connect
+    const M0 = getMqttLib();
+    if (M0) {
+      startConnect(M0);
+    } else {
+      loadMqttScript().then((M) => startConnect(M));
+    }
   }
 
   function onMqttMessage(topic, data) {
     if (!data || typeof data !== 'object') return;
 
+    // Discovery: someone asked who is online → reply with presence
+    if (data.t === 'who') {
+      if (data.fromId !== getPresenceId()) {
+        // small random delay so not all reply same ms
+        setTimeout(() => publishPresence(true), 50 + Math.random() * 400);
+      }
+      return;
+    }
+
     if (data.t === 'presence' && data.id) {
-      if (data.ts && Math.abs(Date.now() - data.ts) > 5 * 60 * 1000) return;
+      // Don't drop for clock skew — we use local receive time in upsertPerson
       upsertPerson(data);
       renderNearbyList();
+      updatePresenceHint();
       return;
     }
 
@@ -2189,10 +2257,20 @@
       showRegister();
     });
     el.btnRefreshHome?.addEventListener('click', () => {
+      if (!state.mqttReady) {
+        mqttBooting = false;
+        try { state.mqtt?.end?.(true); } catch {}
+        state.mqtt = null;
+        ensureMqtt();
+      }
       publishPresence(true);
-      prunePeople();
-      renderNearbyList();
-      toast('Refreshed', 'ok');
+      askWhoIsOnline();
+      setTimeout(() => {
+        prunePeople();
+        renderNearbyList();
+        updatePresenceHint();
+      }, 600);
+      toast(state.mqttReady ? 'Scanning nearby…' : 'Reconnecting…', 'ok');
     });
 
     el.btnInviteAccept?.addEventListener('click', acceptInvite);
