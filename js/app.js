@@ -145,7 +145,73 @@
     outgoingMids: new Map(), // mid -> { el, status }
     displayedMids: new Set(), // prevent double-render (PeerJS + MQTT)
     sendLock: false,
+    chatSessionOpen: false,
+    peerRetryTimer: null,
+    personalCode: '',
   };
+
+  function getPersonalCode() {
+    if (state.personalCode) return state.personalCode;
+    try {
+      let c = localStorage.getItem('hivedrop_share_code');
+      if (!c || c.length < 4) {
+        c = randomRoom();
+        localStorage.setItem('hivedrop_share_code', c);
+      }
+      state.personalCode = sanitizeRoom(c) || randomRoom();
+      localStorage.setItem('hivedrop_share_code', state.personalCode);
+      return state.personalCode;
+    } catch {
+      state.personalCode = randomRoom();
+      return state.personalCode;
+    }
+  }
+
+  function shareUrl(code) {
+    const u = new URL(location.href);
+    u.search = '';
+    u.searchParams.set('room', code || getPersonalCode());
+    u.searchParams.set('share', '1');
+    const n = state.name || loadName() || '';
+    if (n) u.searchParams.set('from', n);
+    return u.toString();
+  }
+
+  function renderHomeShareQr() {
+    const code = getPersonalCode();
+    const box = $('#homeQrBox');
+    const img = $('#homeQrImg');
+    const codeEl = $('#homeShareCode');
+    if (codeEl) codeEl.textContent = code;
+    const url = shareUrl(code);
+    if (box) {
+      box.innerHTML = '';
+      box.classList.remove('hidden');
+    }
+    if (img) {
+      img.classList.add('hidden');
+      img.removeAttribute('src');
+    }
+    if (window.QRCode && box) {
+      try {
+        // eslint-disable-next-line no-new
+        new QRCode(box, {
+          text: url,
+          width: 200,
+          height: 200,
+          colorDark: '#0f172a',
+          colorLight: '#ffffff',
+          correctLevel: window.QRCode.CorrectLevel ? QRCode.CorrectLevel.M : 0
+        });
+        if (box.querySelector('img, canvas')) return;
+      } catch (e) { console.warn(e); }
+    }
+    if (img) {
+      box?.classList.add('hidden');
+      img.classList.remove('hidden');
+      img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=8&data=' + encodeURIComponent(url);
+    }
+  }
 
   function loadGroups() {
     try {
@@ -286,6 +352,8 @@
     if (el.meNameLabel) el.meNameLabel.textContent = state.name || loadName() || '—';
     if (el.nameInput && state.name) el.nameInput.value = state.name;
     renderNearbyList();
+    renderGroupList();
+    setTimeout(renderHomeShareQr, 100);
   }
   function showRoom() {
     hideAllViews();
@@ -326,8 +394,8 @@
     saveName(name);
     if (el.nameInput) el.nameInput.value = name;
     if (el.meNameLabel) el.meNameLabel.textContent = name;
+    getPersonalCode();
     ensureMqtt(() => {
-      // subscribe username channel after name known
       try {
         const uname = name.toLowerCase().replace(/\s+/g, '_').slice(0, 32);
         state.mqtt?.subscribe?.(PRESENCE_TOPIC + '/user/' + uname, { qos: 0 });
@@ -337,7 +405,14 @@
     startPresenceLoop();
     showJoin();
     updatePresenceHint();
-    toast(`Hi ${name} · nearby users loading…`, 'ok');
+    renderHomeShareQr();
+    toast(`Hi ${name} · show QR to share`, 'ok');
+
+    // If came from scanned QR with room waiting
+    const pendingRoom = sanitizeRoom(el.roomInput?.value || roomFromUrl());
+    if (pendingRoom) {
+      setTimeout(() => enterRoom(name, pendingRoom), 500);
+    }
     return true;
   }
 
@@ -1003,160 +1078,175 @@
     setStatus('');
   }
 
+  /**
+   * STABLE CHAT: MQTT session first (never kick user out).
+   * PeerJS only for files — optional background mesh.
+   */
   function enterRoom(name, room) {
     room = sanitizeRoom(room) || randomRoom();
-    destroyPeer();
     state.name = name;
     state.room = room;
     saveName(name);
     publishPresence(true);
 
-    el.btnJoin.disabled = true;
-    el.btnJoin.textContent = 'Connecting…';
-    setStatus('warn');
+    // Always open chat UI via MQTT — Quick Share style, no drop
+    openMqttChatSession(name, room);
+
+    // PeerJS for files in background (failures do NOT exit chat)
+    if (window.Peer) {
+      startPeerMeshBackground(name, room);
+    } else {
+      const sub = $('#chatSub');
+      if (sub) sub.textContent = 'Chat live · files need refresh';
+    }
+  }
+
+  function openMqttChatSession(name, room) {
+    const already = state.chatSessionOpen && sanitizeRoom(state.room) === room;
+    state.chatSessionOpen = true;
+    state.room = room;
+
+    ensureMqtt(() => {
+      try {
+        state.mqtt.subscribe(groupTopic(room), { qos: 0 });
+        state.mqtt.publish(groupTopic(room), JSON.stringify({
+          t: 'gjoin',
+          fromId: getPresenceId(),
+          fromName: name,
+          room,
+          groupName: state.groupName || '',
+          ts: Date.now()
+        }), { qos: 0 });
+      } catch (e) { console.warn(e); }
+    });
+
+    if (!already) {
+      onJoined();
+    } else {
+      showRoom();
+      updateChatHeader();
+    }
+  }
+
+  function updateChatHeader() {
+    const title = $('#chatTitle');
+    const sub = $('#chatSub');
+    if (state.isGroup) {
+      if (title) title.textContent = state.groupName || ('Group ' + state.room);
+      if (sub) sub.className = 'chat-sub live';
+      if (sub) sub.textContent = `Group · ${state.room} · chat stable`;
+    } else if (state.chatPartnerName) {
+      if (title) title.textContent = state.chatPartnerName;
+      if (sub) { sub.className = 'chat-sub live'; sub.textContent = 'Connected · chat stable'; }
+    } else {
+      if (title) title.textContent = state.name ? `${state.name}'s share` : ('Chat ' + state.room);
+      if (sub) { sub.className = 'chat-sub live'; sub.textContent = `Code ${state.room} · online`; }
+    }
+    if (el.roomBadge) el.roomBadge.textContent = state.room;
+  }
+
+  function startPeerMeshBackground(name, room) {
+    // Soft: clear old peer without wiping chat session
+    try {
+      if (state.peerRetryTimer) {
+        clearTimeout(state.peerRetryTimer);
+        state.peerRetryTimer = null;
+      }
+      for (const c of state.conns.values()) {
+        try { c.close(); } catch {}
+      }
+      state.conns.clear();
+      try { state.peer?.destroy(); } catch {}
+      state.peer = null;
+      state.id = null;
+      state.peers.clear();
+    } catch {}
 
     const hid = hostPeerId(room);
     state.hostId = hid;
-
-    // Try become host first
-    const hostPeer = new Peer(hid, peerConfig());
-
     let settled = false;
 
-    const failHostBecomeClient = () => {
+    const hostPeer = new Peer(hid, peerConfig());
+
+    const asClient = () => {
       if (settled) return;
+      settled = true;
       try { hostPeer.destroy(); } catch {}
-      becomeClient(name, room, hid);
+      softPeerClient(name, room, hid);
     };
 
     hostPeer.on('open', (id) => {
       if (settled) return;
       settled = true;
-      // We are host
       state.peer = hostPeer;
       state.id = id;
       state.isHost = true;
       state.peers.set(id, { id, name, isHost: true });
-      onJoined();
+      renderPeers();
+      const sub = $('#chatSub');
+      if (sub) { sub.className = 'chat-sub live'; sub.textContent = `Live · files ready · ${state.room}`; }
+      setStatus('on');
     });
 
     hostPeer.on('connection', (conn) => {
       wireConn(conn);
-      // track placeholder until hello
       state.peers.set(conn.peer, { id: conn.peer, name: '…', isHost: false });
       renderPeers();
     });
 
     hostPeer.on('error', (err) => {
-      console.warn('host peer error', err?.type || err);
-      // Room already has a host → join as client
-      if (err?.type === 'unavailable-id') {
-        failHostBecomeClient();
-        return;
-      }
-      if (!settled && (err?.type === 'network' || err?.type === 'server-error')) {
-        toast('Cannot reach PeerJS — check internet', 'err');
-        el.btnJoin.disabled = false;
-        el.btnJoin.innerHTML = 'Enter hive <span>→</span>';
-        setStatus('');
-        try { hostPeer.destroy(); } catch {}
-      }
+      console.warn('host peer', err?.type || err);
+      if (err?.type === 'unavailable-id') asClient();
+      // never leave chat UI
     });
 
-    // Safety: if host id never opens (rare), try client path
-    setTimeout(() => {
-      if (!settled) failHostBecomeClient();
-    }, 5000);
+    hostPeer.on('disconnected', () => {
+      try { hostPeer.reconnect(); } catch {}
+    });
+
+    setTimeout(() => { if (!settled) asClient(); }, 4000);
   }
 
-  function becomeClient(name, room, hid) {
+  function softPeerClient(name, room, hid) {
     const client = new Peer(peerConfig());
-
     state.peer = client;
     state.isHost = false;
     state.hostId = hid;
-    let joined = false;
-    let tries = 0;
-
-    const finishJoin = () => {
-      if (joined) return;
-      joined = true;
-      onJoined();
-    };
-
-    const tryConnectHost = () => {
-      tries += 1;
-      try {
-        const conn = client.connect(hid, { reliable: true });
-        wireConn(conn);
-        conn.on('open', () => {
-          // ensure peer in list
-          if (!state.peers.has(hid)) {
-            state.peers.set(hid, { id: hid, name: 'Host', isHost: true });
-            renderPeers();
-          }
-          finishJoin();
-        });
-        // if not open in 4s, retry or takeover
-        setTimeout(() => {
-          if (joined) return;
-          if (tries < 3) {
-            tryConnectHost();
-          } else {
-            // Host ghost — become host ourselves
-            toast('Host offline — you are host now', 'ok');
-            try { client.destroy(); } catch {}
-            state.peer = null;
-            // re-enter as host claim
-            const hostPeer = new Peer(hid, peerConfig());
-            hostPeer.on('open', (id) => {
-              state.peer = hostPeer;
-              state.id = id;
-              state.isHost = true;
-              state.peers.set(id, { id, name, isHost: true });
-              hostPeer.on('connection', (c) => {
-                wireConn(c);
-                state.peers.set(c.peer, { id: c.peer, name: '…', isHost: false });
-                renderPeers();
-              });
-              finishJoin();
-            });
-            hostPeer.on('error', (err) => {
-              if (err?.type === 'unavailable-id') {
-                // someone took it — try client again
-                setTimeout(() => becomeClient(name, room, hid), 800);
-              } else {
-                toast('Could not join room — try again', 'err');
-                el.btnJoin.disabled = false;
-                el.btnJoin.innerHTML = 'Enter hive <span>→</span>';
-                destroyPeer();
-                showJoin();
-              }
-            });
-          }
-        }, 4000);
-      } catch (e) {
-        console.warn(e);
-      }
-    };
 
     client.on('open', (id) => {
       state.id = id;
       state.peers.set(id, { id, name, isHost: false });
-      tryConnectHost();
+      try {
+        const conn = client.connect(hid, { reliable: true });
+        wireConn(conn);
+        conn.on('open', () => {
+          if (!state.peers.has(hid)) {
+            state.peers.set(hid, { id: hid, name: 'Peer', isHost: true });
+          }
+          renderPeers();
+          const sub = $('#chatSub');
+          if (sub) { sub.className = 'chat-sub live'; sub.textContent = `Live · files ready · ${room}`; }
+          setStatus('on');
+        });
+      } catch (e) { console.warn(e); }
     });
 
-    client.on('connection', (conn) => {
-      wireConn(conn);
-    });
+    client.on('connection', (conn) => wireConn(conn));
 
     client.on('error', (err) => {
-      console.warn('client error', err);
-      if (err?.type === 'peer-unavailable') {
-        // handled by retry / takeover timer
-      } else if (err?.type === 'network') {
-        toast('Network error — need internet', 'err');
+      console.warn('client peer', err?.type || err);
+      // Retry quietly — do NOT exit chat
+      if (state.chatSessionOpen && state.room === room) {
+        state.peerRetryTimer = setTimeout(() => {
+          if (state.chatSessionOpen && state.room === room) {
+            startPeerMeshBackground(name, room);
+          }
+        }, 5000);
       }
+    });
+
+    client.on('disconnected', () => {
+      try { client.reconnect(); } catch {}
     });
   }
 
@@ -1165,62 +1255,33 @@
       el.btnJoin.disabled = false;
       el.btnJoin.textContent = 'Enter room code';
     }
-    if (el.roomBadge) el.roomBadge.textContent = state.room;
-    if (el.roleBadge) el.roleBadge.textContent = state.isHost ? 'HOST' : 'JOINED';
-
-    // Header titles
-    const title = $('#chatTitle');
-    const sub = $('#chatSub');
-    if (state.isGroup) {
-      if (title) title.textContent = state.groupName || ('Group ' + state.room);
-      if (sub) sub.textContent = `Group · code ${state.room} · ${state.isHost ? 'admin' : 'member'}`;
-      if (state.room) upsertGroup(state.room, state.groupName || state.room);
-    } else if (state.chatPartnerName) {
-      if (title) title.textContent = state.chatPartnerName;
-      if (sub) sub.textContent = 'online · private chat';
-    } else {
-      if (title) title.textContent = 'Chat ' + state.room;
-      if (sub) sub.textContent = state.isHost ? 'Host · share QR to invite' : 'Connected';
-    }
+    if (el.roleBadge) el.roleBadge.textContent = 'LIVE';
+    updateChatHeader();
+    if (state.isGroup && state.room) upsertGroup(state.room, state.groupName || state.room);
 
     showRoom();
     renderPeers();
     renderQueue();
-    el.chatLog.innerHTML = '';
-    state.outgoingMids.clear();
-    state.displayedMids.clear();
-    addSystem(state.isGroup
-      ? `Group “${state.groupName || state.room}” · members can chat & share files`
-      : (state.isHost ? `Chat ready · share QR / wait for join` : `Joined · say hi 👋`));
+    // Keep history if re-opening same room mid-session
+    if (!el.chatLog.dataset.room || el.chatLog.dataset.room !== state.room) {
+      el.chatLog.innerHTML = '';
+      el.chatLog.dataset.room = state.room;
+      state.outgoingMids.clear();
+      state.displayedMids.clear();
+      addSystem(state.isGroup
+        ? `Group “${state.groupName || state.room}” · chat stable · share files below`
+        : `Chat open · scan your QR / wait · messages stay connected`);
+    }
     setStatus('on');
-    toast(state.isGroup ? 'Group open' : (state.isHost ? 'Chat open' : 'Joined'), 'ok');
+    toast(state.isGroup ? 'Group open' : 'Chat connected', 'ok');
 
     const u = new URL(location.href);
     u.searchParams.set('room', state.room);
+    u.searchParams.set('share', '1');
     if (state.isGroup) u.searchParams.set('group', '1');
     if (state.groupName) u.searchParams.set('gname', state.groupName);
     history.replaceState(null, '', u);
 
-    // Subscribe group MQTT channel
-    if (state.room) {
-      ensureMqtt(() => {
-        try {
-          state.mqtt.subscribe(groupTopic(state.room), { qos: 0 });
-          state.mqtt.publish(groupTopic(state.room), JSON.stringify({
-            t: 'gjoin',
-            fromId: getPresenceId(),
-            fromName: state.name,
-            room: state.room,
-            groupName: state.groupName || '',
-            ts: Date.now()
-          }), { qos: 0 });
-        } catch {}
-      });
-    }
-
-    if (state.isHost && !state.chatPartnerName) {
-      setTimeout(() => openQr(), 400);
-    }
     startAnnouncing();
     setTimeout(markVisibleMessagesSeen, 500);
   }
@@ -1308,6 +1369,12 @@
   }
 
   function leave() {
+    // User-initiated only — soft leave
+    state.chatSessionOpen = false;
+    if (state.peerRetryTimer) {
+      clearTimeout(state.peerRetryTimer);
+      state.peerRetryTimer = null;
+    }
     destroyPeer();
     state.room = '';
     state.isHost = false;
@@ -1319,9 +1386,12 @@
     u.searchParams.delete('room');
     u.searchParams.delete('group');
     u.searchParams.delete('gname');
+    u.searchParams.delete('share');
+    u.searchParams.delete('from');
     history.replaceState(null, '', u.pathname + u.hash);
     showJoin();
     renderGroupList();
+    renderHomeShareQr();
     toast('Back to home');
     updatePresenceHint();
   }
@@ -2276,15 +2346,44 @@
     el.btnInviteAccept?.addEventListener('click', acceptInvite);
     el.btnInviteDecline?.addEventListener('click', declineInvite);
 
-    // Home tabs: Users / Groups
+    // Home tabs: Share / Users / Groups
     $$('[data-home-tab]').forEach((tab) => {
       tab.addEventListener('click', () => {
         $$('[data-home-tab]').forEach((t) => t.classList.toggle('active', t === tab));
         const name = tab.getAttribute('data-home-tab');
+        $('#paneShare')?.classList.toggle('active', name === 'share');
         $('#paneUsers')?.classList.toggle('active', name === 'users');
         $('#paneGroups')?.classList.toggle('active', name === 'groups');
         if (name === 'groups') renderGroupList();
+        if (name === 'share') renderHomeShareQr();
+        if (name === 'users') {
+          publishPresence(true);
+          askWhoIsOnline();
+          renderNearbyList();
+        }
       });
+    });
+
+    $('#btnCopyShare')?.addEventListener('click', async () => {
+      const url = shareUrl(getPersonalCode());
+      try {
+        await navigator.clipboard.writeText(url);
+        toast('Share link copied', 'ok');
+      } catch {
+        toast(url, 'ok');
+      }
+    });
+    $('#btnOpenShareChat')?.addEventListener('click', () => {
+      const myName = state.name || loadName();
+      if (!myName) return showRegister();
+      state.isGroup = false;
+      state.groupName = '';
+      state.chatPartnerName = '';
+      enterRoom(myName, getPersonalCode());
+    });
+    $('#btnScanToJoin')?.addEventListener('click', () => {
+      openNearby();
+      switchNearbyTab('camera');
     });
 
     $('#btnCreateGroup')?.addEventListener('click', () => {
@@ -2451,18 +2550,27 @@
     showRegister();
   }
 
-  // Deep link: ?room=CODE&group=1&gname=Name
+  // Deep link / QR scan: ?room=CODE&share=1&from=Name
   const bootRoom = roomFromUrl();
   const params = new URLSearchParams(location.search);
-  if (bootRoom && bootName && window.Peer) {
+  if (bootRoom && bootName) {
     if (el.roomInput) el.roomInput.value = bootRoom;
     if (params.get('group') === '1') {
       state.isGroup = true;
       state.groupName = params.get('gname') || bootRoom;
-      setTimeout(() => openGroup(bootRoom, state.groupName), 500);
+      setTimeout(() => openGroup(bootRoom, state.groupName), 400);
     } else {
-      setTimeout(() => el.btnJoin?.click(), 600);
+      // Quick Share join — stable MQTT chat
+      const from = params.get('from') || '';
+      if (from) state.chatPartnerName = from;
+      state.isGroup = false;
+      setTimeout(() => enterRoom(bootName, bootRoom), 400);
     }
+  } else if (bootRoom && !bootName) {
+    // Need register first, keep room
+    if (el.roomInput) el.roomInput.value = bootRoom;
+    if (el.regNameInput) el.regNameInput.placeholder = 'Enter username to join chat';
+    toast('Username type panni Continue — then chat open aagum', 'ok');
   } else if (bootRoom && el.roomInput) {
     el.roomInput.value = bootRoom;
   }

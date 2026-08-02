@@ -632,3 +632,54 @@ body {
 .members-drawer { background: #ffffff !important; }
 .peer-item { background: #f8fafc; border: 1px solid var(--border); }
 .chat-title { color: var(--text); }
+/* Quick Share card */
+.share-card {
+  text-align: center;
+  padding: 8px 4px 4px;
+}
+.share-lead {
+  color: var(--muted);
+  font-size: 0.92rem;
+  margin-bottom: 14px;
+  line-height: 1.4;
+}
+.share-qr {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+  border-radius: 16px;
+  padding: 12px;
+  min-height: 220px;
+  min-width: 220px;
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
+  margin: 0 auto 8px;
+}
+.share-qr img, .share-qr canvas { display: block; border-radius: 4px; }
+.share-qr-img {
+  display: block;
+  margin: 0 auto 8px;
+  background: #fff;
+  border-radius: 16px;
+  padding: 12px;
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
+}
+.share-code-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+  font-weight: 700;
+  margin-top: 8px;
+}
+.share-code {
+  font-size: 1.8rem;
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  color: var(--accent);
+  margin: 4px 0 14px;
+}
+.share-btns { display: flex; gap: 8px; }
+.chat-sub.live { color: var(--ok); font-weight: 600; }

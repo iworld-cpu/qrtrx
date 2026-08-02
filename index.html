@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/style.css?v=12" />
+  <link rel="stylesheet" href="css/style.css?v=13" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⬡</text></svg>" />
   <link rel="manifest" href="manifest.webmanifest" />
 </head>
@@ -57,12 +57,30 @@
         </div>
 
         <div class="home-tabs">
-          <button type="button" class="home-tab active" data-home-tab="users">👤 Users</button>
+          <button type="button" class="home-tab active" data-home-tab="share">⚡ Share</button>
+          <button type="button" class="home-tab" data-home-tab="users">👤 Users</button>
           <button type="button" class="home-tab" data-home-tab="groups">👥 Groups</button>
         </div>
 
+        <!-- QUICK SHARE (like iPhone share) -->
+        <div id="paneShare" class="home-pane active">
+          <div class="share-card">
+            <p class="share-lead">Nearby people can <strong>scan</strong> &amp; chat / send files</p>
+            <div id="homeQrBox" class="share-qr"></div>
+            <img id="homeQrImg" class="share-qr-img hidden" alt="Share QR" width="220" height="220" />
+            <p class="share-code-label">Your code</p>
+            <p id="homeShareCode" class="share-code mono">————</p>
+            <div class="share-btns">
+              <button type="button" id="btnCopyShare" class="btn secondary flex1">Copy link</button>
+              <button type="button" id="btnOpenShareChat" class="btn primary flex1">Open my chat</button>
+            </div>
+            <button type="button" id="btnScanToJoin" class="btn ghost block" style="margin-top:10px">📷 Scan QR to join someone</button>
+            <p class="hint-sm center" style="margin-top:10px">iPhone contact-share mathiri — QR show · scan · msg + files</p>
+          </div>
+        </div>
+
         <!-- USERS -->
-        <div id="paneUsers" class="home-pane active">
+        <div id="paneUsers" class="home-pane">
           <div id="homePeople" class="home-people big">
             <div class="home-people-h">
               <span>Nearby users</span>
@@ -75,7 +93,7 @@
               <li class="nearby-empty">Waiting for users…</li>
             </ul>
           </div>
-          <p class="hint-sm center">Tap user → 1:1 chat + files</p>
+          <p class="hint-sm center">Tap user → chat + files (stable)</p>
         </div>
 
         <!-- GROUPS -->
@@ -273,6 +291,6 @@
   <script src="https://unpkg.com/mqtt@4.3.7/dist/mqtt.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
-  <script src="js/app.js?v=12"></script>
+  <script src="js/app.js?v=13"></script>
 </body>
 </html>
