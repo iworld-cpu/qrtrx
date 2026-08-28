@@ -683,3 +683,35 @@ body {
 }
 .share-btns { display: flex; gap: 8px; }
 .chat-sub.live { color: var(--ok); font-weight: 600; }
+/* Batch file progress */
+.batch-progress {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+.batch-progress.hidden { display: none !important; }
+.batch-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.batch-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+.batch-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #0284c7, #7c3aed);
+  transition: width 0.2s ease;
+}

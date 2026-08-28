@@ -7,8 +7,9 @@
 
   const CHUNK = 16 * 1024; // PeerJS chunk
   const MQTT_FILE_CHUNK = 8 * 1024; // 8KB raw → ~11KB base64 (broker-safe)
-  const MAX_FILE = 80 * 1024 * 1024; // 80 MB soft cap (MQTT group path)
-  const MAX_MQTT_FILE = 40 * 1024 * 1024; // prefer under 40MB for group reliability
+  const MAX_FILE = 80 * 1024 * 1024; // 80 MB soft cap per file
+  const MAX_MQTT_FILE = 40 * 1024 * 1024; // prefer under 40MB each
+  const MAX_BATCH_FILES = 30; // support ~20+ files in one share
   const PEER_PREFIX = 'hivedrop-';
   const NEARBY_TTL_MS = 90_000;
   const PRESENCE_TOPIC = 'qrtrx/v1/presence';
@@ -150,6 +151,7 @@
     chatSessionOpen: false,
     peerRetryTimer: null,
     personalCode: '',
+    batchSending: false,
   };
 
   function getPersonalCode() {
@@ -891,15 +893,29 @@
     return btoa(s);
   }
 
+  function setBatchUI(on, text, pct) {
+    const wrap = $('#batchProgress');
+    const label = $('#batchLabel');
+    const fill = $('#batchFill');
+    if (!wrap) return;
+    wrap.classList.toggle('hidden', !on);
+    if (label && text) label.textContent = text;
+    if (fill && pct != null) fill.style.width = `${Math.min(100, pct)}%`;
+  }
+
   /**
-   * GROUP / ROOM FILES — MQTT first (everyone in group gets it).
-   * PeerJS optional bonus if mesh is up.
+   * Batch share (20+ files) — MQTT first, sequential queue.
+   * Everyone in group/chat gets each file.
    */
   async function sendFilesInRoom(files) {
-    const list = files || [...state.pendingFiles];
+    let list = files || [...state.pendingFiles];
     if (!list.length) return;
     if (!state.room) {
       toast('Open a chat/group first', 'err');
+      return;
+    }
+    if (state.batchSending) {
+      toast('Already sharing files… wait', 'ok');
       return;
     }
     if (!state.mqttReady) {
@@ -908,116 +924,153 @@
       return;
     }
 
-    for (const file of list) {
+    if (list.length > MAX_BATCH_FILES) {
+      toast(`Max ${MAX_BATCH_FILES} files — first ${MAX_BATCH_FILES} send aagum`, 'ok');
+      list = list.slice(0, MAX_BATCH_FILES);
+    }
+
+    state.batchSending = true;
+    const total = list.length;
+    const fromName = state.name || loadName() || 'Someone';
+    let okCount = 0;
+    let failCount = 0;
+
+    // Announce batch start to group
+    await mqttPublishGroup({
+      t: 'gfile-batch',
+      count: total,
+      fromId: getPresenceId(),
+      fromName,
+      room: state.room,
+      ts: Date.now()
+    });
+    addSystem(`Sharing ${total} file(s) to group…`);
+    setBatchUI(true, `0 / ${total} files`, 0);
+    toast(`${total} files share aagudhu…`, 'ok');
+
+    // Multi-file: skip PeerJS (faster + more stable on MQTT)
+    const usePeer = total <= 2 && state.conns.size > 0;
+
+    for (let n = 0; n < list.length; n++) {
+      const file = list[n];
+      const batchPct = (n / total) * 100;
+      setBatchUI(true, `File ${n + 1} / ${total} · ${file.name}`, batchPct);
+
       if (file.size > MAX_FILE) {
-        toast(`${file.name} too large (max ~80MB)`, 'err');
+        toast(`${file.name} skipped (too large)`, 'err');
+        failCount += 1;
         continue;
       }
-      if (file.size > MAX_MQTT_FILE) {
-        toast(`${file.name} large — may be slow on group share`, 'ok');
-      }
 
-      const fid = 'f_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
-      const fromName = state.name || loadName() || 'Someone';
-      const mime = file.type || 'application/octet-stream';
-      const totalChunks = Math.ceil(file.size / MQTT_FILE_CHUNK) || 1;
+      try {
+        const fid = 'f_' + Math.random().toString(36).slice(2, 8) + Date.now().toString(36);
+        const mime = file.type || 'application/octet-stream';
+        const totalChunks = Math.ceil(file.size / MQTT_FILE_CHUNK) || 1;
 
-      // Show in sender chat immediately
-      const localUrl = URL.createObjectURL(file);
-      addChat({
-        name: fromName,
-        me: true,
-        mid: 'file_' + fid,
-        file: { url: localUrl, name: file.name, size: file.size },
-        status: 'sent'
-      });
-      showTransfer(fid, file.name, 0, 'Sharing to group…');
-      addSystem(`Sharing ${file.name} to group…`);
+        const localUrl = URL.createObjectURL(file);
+        addChat({
+          name: fromName,
+          me: true,
+          mid: 'file_' + fid,
+          file: { url: localUrl, name: file.name, size: file.size },
+          status: 'sent'
+        });
+        showTransfer(fid, file.name, 0, `${n + 1}/${total} sharing…`);
 
-      const meta = {
-        t: 'gfile-meta',
-        fid,
-        name: file.name,
-        size: file.size,
-        mime,
-        fromId: getPresenceId(),
-        fromName,
-        room: state.room,
-        totalChunks,
-        ts: Date.now()
-      };
-
-      // 1) MQTT group — all members
-      await mqttPublishGroup(meta);
-
-      // 2) PeerJS bonus to whoever is connected
-      for (const [tid, conn] of state.conns) {
-        if (tid === state.id) continue;
-        send(conn, {
-          t: 'file-meta',
+        await mqttPublishGroup({
+          t: 'gfile-meta',
           fid,
           name: file.name,
           size: file.size,
           mime,
+          fromId: getPresenceId(),
           fromName,
-          fromId: getPresenceId()
-        });
-      }
-
-      const buf = new Uint8Array(await file.arrayBuffer());
-      let offset = 0;
-      let index = 0;
-      while (offset < buf.length) {
-        const slice = buf.subarray(offset, offset + MQTT_FILE_CHUNK);
-        const b64 = u8ToB64(slice);
-        const chunkMsg = {
-          t: 'gfile-chunk',
-          fid,
-          index,
-          chunk: b64,
           room: state.room,
-          fromId: getPresenceId()
-        };
-        await mqttPublishGroup(chunkMsg);
+          totalChunks,
+          batchIndex: n + 1,
+          batchTotal: total,
+          ts: Date.now()
+        });
 
-        // PeerJS bonus
-        for (const [tid, conn] of state.conns) {
-          if (tid === state.id) continue;
-          send(conn, { t: 'file-chunk', fid, chunk: b64 });
+        if (usePeer) {
+          for (const [tid, conn] of state.conns) {
+            if (tid === state.id) continue;
+            send(conn, {
+              t: 'file-meta', fid, name: file.name, size: file.size, mime,
+              fromName, fromId: getPresenceId()
+            });
+          }
         }
 
-        offset += slice.length;
-        index += 1;
-        const pct = (offset / buf.length) * 100;
-        showTransfer(fid, file.name, pct, `Sharing… ${fmtBytes(offset)}`);
-        // yield so UI + MQTT breathe
-        await new Promise((r) => setTimeout(r, 15));
+        const buf = new Uint8Array(await file.arrayBuffer());
+        let offset = 0;
+        let index = 0;
+        while (offset < buf.length) {
+          const slice = buf.subarray(offset, offset + MQTT_FILE_CHUNK);
+          const b64 = u8ToB64(slice);
+          await mqttPublishGroup({
+            t: 'gfile-chunk',
+            fid,
+            index,
+            chunk: b64,
+            room: state.room,
+            fromId: getPresenceId()
+          });
+          if (usePeer) {
+            for (const [tid, conn] of state.conns) {
+              if (tid === state.id) continue;
+              send(conn, { t: 'file-chunk', fid, chunk: b64 });
+            }
+          }
+          offset += slice.length;
+          index += 1;
+          const pct = (offset / buf.length) * 100;
+          showTransfer(fid, file.name, pct, `${n + 1}/${total} · ${fmtBytes(offset)}`);
+          // Slightly slower for big batches = more reliable
+          await new Promise((r) => setTimeout(r, total >= 10 ? 25 : 12));
+        }
+
+        await mqttPublishGroup({
+          t: 'gfile-end',
+          fid,
+          room: state.room,
+          fromId: getPresenceId(),
+          name: file.name,
+          size: file.size,
+          mime,
+          fromName,
+          batchIndex: n + 1,
+          batchTotal: total,
+          ts: Date.now()
+        });
+
+        if (usePeer) {
+          for (const [tid, conn] of state.conns) {
+            if (tid === state.id) continue;
+            send(conn, { t: 'file-end', fid });
+          }
+        }
+
+        showTransfer(fid, file.name, 100, `${n + 1}/${total} ✓`);
+        updateMsgTicks('file_' + fid, 'delivered');
+        okCount += 1;
+        setTimeout(() => removeTransfer(fid), 2500);
+        // pause between files so receivers keep up
+        await new Promise((r) => setTimeout(r, total >= 10 ? 200 : 80));
+      } catch (e) {
+        console.warn('batch file fail', e);
+        failCount += 1;
+        toast(`${file.name} failed`, 'err');
       }
-
-      await mqttPublishGroup({
-        t: 'gfile-end',
-        fid,
-        room: state.room,
-        fromId: getPresenceId(),
-        name: file.name,
-        size: file.size,
-        mime,
-        fromName,
-        ts: Date.now()
-      });
-
-      for (const [tid, conn] of state.conns) {
-        if (tid === state.id) continue;
-        send(conn, { t: 'file-end', fid });
-      }
-
-      showTransfer(fid, file.name, 100, 'Shared to group ✓');
-      updateMsgTicks('file_' + fid, 'delivered');
-      toast(`${file.name} group-ku send aayiduchu`, 'ok');
-      setTimeout(() => removeTransfer(fid), 3000);
     }
 
+    setBatchUI(true, `Done · ${okCount}/${total} sent` + (failCount ? ` · ${failCount} failed` : ''), 100);
+    addSystem(`Shared ${okCount}/${total} file(s) to group`);
+    toast(`${okCount} files group-ku send ✓`, 'ok');
+    setTimeout(() => setBatchUI(false), 4000);
+
     state.pendingFiles = [];
+    state.batchSending = false;
     renderQueue();
   }
 
@@ -1062,8 +1115,13 @@
       total: data.size || 0,
       totalChunks: data.totalChunks || 0
     });
-    showTransfer(data.fid, data.name, 0, `Receiving from ${data.fromName}…`);
-    toast(`${data.fromName} file share panran…`, 'ok');
+    const batch = (data.batchIndex && data.batchTotal)
+      ? `${data.batchIndex}/${data.batchTotal} · `
+      : '';
+    showTransfer(data.fid, data.name, 0, `${batch}Receiving from ${data.fromName}…`);
+    if (!data.batchIndex || data.batchIndex === 1) {
+      toast(`${data.fromName} files share panran…`, 'ok');
+    }
   }
 
   function handleGFileChunk(data) {
@@ -2282,6 +2340,11 @@
       }
 
       // ===== GROUP FILE SHARE (all members) =====
+      if (data.t === 'gfile-batch' && data.fromId !== getPresenceId()) {
+        addSystem(`${data.fromName || 'Someone'} is sharing ${data.count || '?'} file(s)…`);
+        toast(`${data.fromName}: ${data.count} files incoming`, 'ok');
+        return;
+      }
       if (data.t === 'gfile-meta' && data.fromId !== getPresenceId()) {
         handleGFileMeta(data);
         return;
@@ -2540,22 +2603,39 @@
 
   // ── Events ─────────────────────────────────────────────
   function addFiles(list) {
-    for (const f of list) {
+    if (state.batchSending) {
+      toast('Wait — files still sharing…', 'ok');
+      return;
+    }
+    const incoming = [...list];
+    if (!incoming.length) return;
+
+    let added = 0;
+    for (const f of incoming) {
+      if (state.pendingFiles.length >= MAX_BATCH_FILES) break;
       if (state.pendingFiles.some((x) => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified)) continue;
       state.pendingFiles.push(f);
+      added += 1;
     }
+    if (incoming.length > added) {
+      toast(`Max ${MAX_BATCH_FILES} files — ${added} queued`, 'ok');
+    }
+
     renderQueue();
-    // Auto-share to group/room via MQTT (does not need PeerJS peers)
+
     if (state.pendingFiles.length && state.room) {
       const snapshot = [...state.pendingFiles];
       state.pendingFiles = [];
       renderQueue();
+      const n = snapshot.length;
+      toast(n === 1 ? 'Sharing 1 file…' : `Sharing ${n} files to group…`, 'ok');
       sendFilesInRoom(snapshot).catch((e) => {
         console.warn(e);
+        state.batchSending = false;
         toast('File share failed — retry', 'err');
       });
     } else if (state.pendingFiles.length && !state.room) {
-      toast('Open group/chat first, then attach file', 'err');
+      toast('Open group/chat first, then attach files', 'err');
       state.pendingFiles = [];
       renderQueue();
     }

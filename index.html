@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/style.css?v=14" />
+  <link rel="stylesheet" href="css/style.css?v=15" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⬡</text></svg>" />
   <link rel="manifest" href="manifest.webmanifest" />
 </head>
@@ -164,10 +164,14 @@
 
           <div class="file-strip" id="fileStrip">
             <div id="dropZone" class="drop mini" tabindex="0">
-              <span>📎 Share file to this group/chat</span>
+              <span>📎 Share up to 20–30 files (multi-select)</span>
               <input type="file" id="fileInput" multiple hidden />
             </div>
-            <p class="hint-sm center" id="fileHint">Group-la ellarum download panna mudiyum</p>
+            <p class="hint-sm center" id="fileHint">Oru select-la many photos — group ellarum download</p>
+            <div id="batchProgress" class="batch-progress hidden">
+              <div id="batchLabel" class="batch-label">Sharing…</div>
+              <div class="batch-bar"><div id="batchFill" class="batch-fill"></div></div>
+            </div>
             <div id="fileQueue" class="file-queue"></div>
             <div id="transferList" class="transfer-list"></div>
             <div class="send-row hidden">
@@ -292,6 +296,6 @@
   <script src="https://unpkg.com/mqtt@4.3.7/dist/mqtt.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
-  <script src="js/app.js?v=14"></script>
+  <script src="js/app.js?v=15"></script>
 </body>
 </html>
