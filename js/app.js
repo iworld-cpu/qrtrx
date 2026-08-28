@@ -16,8 +16,8 @@
   const PRESENCE_TOPIC = 'qrtrx/v1/presence';
   const MQTT_URLS = [
     'wss://broker.emqx.io:8084/mqtt',
-    'wss://broker.hivemq.com:8884/mqtt',
-    'wss://test.mosquitto.org:8081'
+    'wss://broker.emqx.io:8083/mqtt',
+    'wss://broker.hivemq.com:8884/mqtt'
   ];
   const MQTT_SCRIPT_URLS = [
     'https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js',
@@ -997,17 +997,19 @@
     subscribeGroupTopic(state.room);
     if (window.Peer && countOpenPeerConns() === 0) {
       startPeerMeshBackground(state.name || loadName(), state.room);
-      await new Promise((r) => setTimeout(r, 800));
     }
-    if (!state.mqttReady) {
-      toast('Connecting…', 'ok');
-      ensureMqtt();
-      await new Promise((r) => setTimeout(r, 1000));
+    toast('Connecting network…', 'ok');
+    const ready = await waitForMqtt(18000);
+    if (!ready) {
+      // Force hard reconnect once
+      forceMqttReconnect();
+      const ready2 = await waitForMqtt(12000);
+      if (!ready2) {
+        toast('Internet check pannunga — then Refresh / retry', 'err');
+        return;
+      }
     }
-    if (!state.mqttReady) {
-      toast('Network not ready — retry', 'err');
-      return;
-    }
+    subscribeGroupTopic(state.room);
 
     if (list.length > MAX_BATCH_FILES) {
       toast(`Max ${MAX_BATCH_FILES} — first ${MAX_BATCH_FILES} send`, 'ok');
@@ -2260,17 +2262,46 @@
   let mqttBooting = false;
   const mqttWaiters = [];
 
+  function flushMqttWaiters() {
+    while (mqttWaiters.length) {
+      try { mqttWaiters.shift()(); } catch (e) { console.warn(e); }
+    }
+  }
+
+  function waitForMqtt(ms = 15000) {
+    return new Promise((resolve) => {
+      if (state.mqttReady) return resolve(true);
+      ensureMqtt();
+      const start = Date.now();
+      const iv = setInterval(() => {
+        if (state.mqttReady) {
+          clearInterval(iv);
+          resolve(true);
+        } else if (Date.now() - start >= ms) {
+          clearInterval(iv);
+          resolve(!!state.mqttReady);
+        }
+      }, 250);
+    });
+  }
+
+  function forceMqttReconnect() {
+    mqttBooting = false;
+    state.mqttReady = false;
+    try {
+      state.mqtt?.removeAllListeners?.();
+      state.mqtt?.end?.(true);
+    } catch {}
+    state.mqtt = null;
+    state.subscribedGroups = new Set();
+    ensureMqtt();
+  }
+
   function ensureMqtt(cb) {
     if (typeof cb === 'function') mqttWaiters.push(cb);
 
-    const flushWaiters = () => {
-      while (mqttWaiters.length) {
-        try { mqttWaiters.shift()(); } catch (e) { console.warn(e); }
-      }
-    };
-
     if (state.mqtt && state.mqttReady) {
-      flushWaiters();
+      flushMqttWaiters();
       return;
     }
     if (mqttBooting) return;
@@ -2279,11 +2310,9 @@
     const startConnect = (M) => {
       if (!M || typeof M.connect !== 'function') {
         mqttBooting = false;
-        if (el.nearbyStatus) el.nearbyStatus.textContent = 'Nearby offline — refresh page';
-        toast('Nearby connect fail — internet / refresh', 'err');
+        if (el.nearbyStatus) el.nearbyStatus.textContent = 'Nearby offline — refresh';
         updatePresenceHint();
-        // retry load later
-        setTimeout(() => { mqttBooting = false; ensureMqtt(); }, 5000);
+        setTimeout(() => ensureMqtt(), 4000);
         return;
       }
 
@@ -2294,9 +2323,9 @@
         if (urlIndex >= MQTT_URLS.length) {
           state.mqttReady = false;
           mqttBooting = false;
-          if (el.nearbyStatus) el.nearbyStatus.textContent = 'Nearby offline — tap Refresh';
+          if (el.nearbyStatus) el.nearbyStatus.textContent = 'Offline — tap Refresh';
           updatePresenceHint();
-          setTimeout(() => ensureMqtt(), 4000);
+          setTimeout(() => ensureMqtt(), 3000);
           return;
         }
         const url = MQTT_URLS[urlIndex++];
@@ -2306,17 +2335,26 @@
             state.mqtt = null;
           }
           const client = M.connect(url, {
-            clientId: 'qrtrx_' + String(pid).replace(/[^a-zA-Z0-9]/g, '').slice(0, 12) + '_' + Math.random().toString(16).slice(2, 6),
+            clientId: 'qrtrx' + String(pid).replace(/[^a-zA-Z0-9]/g, '').slice(-10) + Math.random().toString(16).slice(2, 6),
             clean: true,
-            connectTimeout: 12000,
-            reconnectPeriod: 0, // we handle reconnect
-            keepalive: 15,
-            protocolVersion: 4
+            connectTimeout: 8000,
+            reconnectPeriod: 4000,
+            keepalive: 20,
+            protocolVersion: 4,
+            resubscribe: true
           });
           state.mqtt = client;
           let settled = false;
 
           const ok = () => {
+            if (settled && state.mqttReady) {
+              // reconnect case
+              state.mqttReady = true;
+              try { subscribeAllGroups(); } catch {}
+              flushMqttWaiters();
+              updatePresenceHint();
+              return;
+            }
             if (settled) return;
             settled = true;
             mqttBooting = false;
@@ -2330,21 +2368,27 @@
               if (uname) client.subscribe(PRESENCE_TOPIC + '/user/' + uname, { qos: 0 });
             } catch (e) { console.warn(e); }
 
-            // Announce + ask who is online + keep ALL groups connected
             publishPresence(true);
             setTimeout(askWhoIsOnline, 300);
-            setTimeout(publishPresence, 800);
-            setTimeout(subscribeAllGroups, 200);
+            setTimeout(publishPresence, 600);
+            setTimeout(subscribeAllGroups, 150);
             startPresenceLoop();
             updatePresenceHint();
             renderNearbyList();
             renderGroupList();
-            flushWaiters();
+            flushMqttWaiters();
+            toast('Network connected ✓', 'ok');
           };
 
           client.on('connect', ok);
-          // some brokers fire 'connect' late — also listen packetconnect
-          client.on('packetreceive', () => {});
+          client.on('reconnect', () => {
+            state.mqttReady = true;
+            mqttBooting = false;
+            try { subscribeAllGroups(); } catch {}
+            publishPresence(true);
+            updatePresenceHint();
+            flushMqttWaiters();
+          });
 
           client.on('message', (topic, buf) => {
             let data;
@@ -2366,16 +2410,20 @@
           });
 
           client.on('offline', () => {
-            if (state.mqtt === client) state.mqttReady = false;
+            if (state.mqtt === client) {
+              state.mqttReady = false;
+              updatePresenceHint();
+            }
           });
 
+          // Try next broker if this one too slow
           setTimeout(() => {
             if (!settled) {
               try { client.end(true); } catch {}
               if (state.mqtt === client) state.mqtt = null;
               connectNext();
             }
-          }, 11000);
+          }, 7500);
         } catch (e) {
           console.warn(e);
           connectNext();
@@ -2385,13 +2433,9 @@
       connectNext();
     };
 
-    // Ensure library then connect
     const M0 = getMqttLib();
-    if (M0) {
-      startConnect(M0);
-    } else {
-      loadMqttScript().then((M) => startConnect(M));
-    }
+    if (M0) startConnect(M0);
+    else loadMqttScript().then((M) => startConnect(M));
   }
 
   function onMqttMessage(topic, data) {
@@ -2792,22 +2836,26 @@
       stopPresenceLoop();
       showRegister();
     });
-    el.btnRefreshHome?.addEventListener('click', () => {
-      if (!state.mqttReady) {
-        mqttBooting = false;
-        try { state.mqtt?.end?.(true); } catch {}
-        state.mqtt = null;
-        ensureMqtt();
-      }
-      publishPresence(true);
-      askWhoIsOnline();
-      setTimeout(() => {
-        prunePeople();
-        renderNearbyList();
-        updatePresenceHint();
-      }, 600);
-      toast(state.mqttReady ? 'Scanning nearby…' : 'Reconnecting…', 'ok');
-    });
+    const doNetReconnect = () => {
+      forceMqttReconnect();
+      toast('Reconnecting network…', 'ok');
+      waitForMqtt(15000).then((ok) => {
+        if (ok) {
+          publishPresence(true);
+          askWhoIsOnline();
+          subscribeAllGroups();
+          prunePeople();
+          renderNearbyList();
+          renderGroupList();
+          updatePresenceHint();
+          toast('Network connected ✓', 'ok');
+        } else {
+          toast('Still offline — check internet / mobile data', 'err');
+        }
+      });
+    };
+    el.btnRefreshHome?.addEventListener('click', doNetReconnect);
+    $('#btnNetReconnect')?.addEventListener('click', doNetReconnect);
 
     el.btnInviteAccept?.addEventListener('click', acceptInvite);
     el.btnInviteDecline?.addEventListener('click', declineInvite);
