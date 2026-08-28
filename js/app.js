@@ -5,11 +5,12 @@
 (() => {
   'use strict';
 
-  const CHUNK = 16 * 1024; // PeerJS chunk
-  const MQTT_FILE_CHUNK = 8 * 1024; // 8KB raw → ~11KB base64 (broker-safe)
-  const MAX_FILE = 80 * 1024 * 1024; // 80 MB soft cap per file
-  const MAX_MQTT_FILE = 40 * 1024 * 1024; // prefer under 40MB each
-  const MAX_BATCH_FILES = 30; // support ~20+ files in one share
+  const CHUNK = 64 * 1024; // PeerJS fast chunk (LAN)
+  const MQTT_FILE_CHUNK = 24 * 1024; // larger MQTT chunks for speed
+  const MQTT_PIPELINE = 4; // parallel chunk publishes
+  const MAX_FILE = 100 * 1024 * 1024;
+  const MAX_MQTT_FILE = 50 * 1024 * 1024;
+  const MAX_BATCH_FILES = 30;
   const PEER_PREFIX = 'hivedrop-';
   const NEARBY_TTL_MS = 90_000;
   const PRESENCE_TOPIC = 'qrtrx/v1/presence';
@@ -152,6 +153,8 @@
     peerRetryTimer: null,
     personalCode: '',
     batchSending: false,
+    subscribedGroups: new Set(), // always-on group MQTT topics
+    fileInbox: [], // background files when not viewing that chat
   };
 
   function getPersonalCode() {
@@ -236,10 +239,69 @@
     else state.groups.unshift(g);
     saveGroups();
     renderGroupList();
+    subscribeGroupTopic(code); // always stay connected
     return g;
   }
   function groupTopic(code) {
     return PRESENCE_TOPIC + '/group/' + String(code).toUpperCase();
+  }
+
+  function subscribeGroupTopic(code) {
+    code = sanitizeRoom(code);
+    if (!code) return;
+    ensureMqtt(() => {
+      if (!state.mqtt || !state.mqttReady) return;
+      const topic = groupTopic(code);
+      if (state.subscribedGroups.has(code)) {
+        // still refresh membership ping
+        try {
+          state.mqtt.publish(topic, JSON.stringify({
+            t: 'gpresence',
+            fromId: getPresenceId(),
+            fromName: state.name || loadName() || '',
+            room: code,
+            ts: Date.now()
+          }), { qos: 0 });
+        } catch {}
+        return;
+      }
+      try {
+        state.mqtt.subscribe(topic, { qos: 0 });
+        state.subscribedGroups.add(code);
+        state.mqtt.publish(topic, JSON.stringify({
+          t: 'gpresence',
+          fromId: getPresenceId(),
+          fromName: state.name || loadName() || '',
+          room: code,
+          ts: Date.now()
+        }), { qos: 0 });
+      } catch (e) { console.warn(e); }
+    });
+  }
+
+  function subscribeAllGroups() {
+    loadGroups();
+    for (const g of state.groups) subscribeGroupTopic(g.code);
+  }
+
+  function countOpenPeerConns() {
+    let n = 0;
+    for (const [id, c] of state.conns) {
+      if (id !== state.id && c && c.open) n += 1;
+    }
+    return n;
+  }
+
+  function mqttPublishRaw(topic, obj) {
+    return new Promise((resolve) => {
+      try {
+        if (!state.mqtt || !state.mqttReady) return resolve(false);
+        state.mqtt.publish(topic, JSON.stringify(obj), { qos: 0 });
+        resolve(true);
+      } catch {
+        resolve(false);
+      }
+    });
   }
 
   function getPresenceId() {
@@ -522,15 +584,23 @@
       list.innerHTML = '<li class="nearby-empty">No groups yet.<br/>Create or join with a code</li>';
       return;
     }
-    list.innerHTML = state.groups.map((g) => `
+    const inboxByRoom = {};
+    for (const f of state.fileInbox) {
+      inboxByRoom[f.room] = (inboxByRoom[f.room] || 0) + 1;
+    }
+    list.innerHTML = state.groups.map((g) => {
+      const live = state.subscribedGroups.has(g.code);
+      const inbox = inboxByRoom[g.code] || 0;
+      return `
       <li class="nearby-item group-item" data-code="${escapeHtml(g.code)}" data-name="${escapeHtml(g.name)}">
         <div class="av">👥</div>
         <div class="meta">
-          <div class="nm">${escapeHtml(g.name)}</div>
-          <div class="rm mono">${escapeHtml(g.code)}</div>
+          <div class="nm">${escapeHtml(g.name)}${inbox ? ` · 📁${inbox}` : ''}</div>
+          <div class="rm"><span class="${live ? 'st-online' : 'st-room'}">${live ? '● Connected' : '○ Reconnecting…'}</span> · <span class="mono">${escapeHtml(g.code)}</span></div>
         </div>
         <span class="join-chip">Open →</span>
-      </li>`).join('');
+      </li>`;
+    }).join('');
     list.querySelectorAll('.group-item').forEach((item) => {
       item.addEventListener('click', () => {
         openGroup(item.dataset.code, item.dataset.name);
@@ -553,6 +623,8 @@
     if (el.roomInput) el.roomInput.value = code;
     if (el.nameInput) el.nameInput.value = myName;
     enterRoom(myName, code);
+    // Show any files received while away
+    setTimeout(() => flushInboxIntoChat(code), 400);
   }
 
   function createGroup(name) {
@@ -904,8 +976,10 @@
   }
 
   /**
-   * Batch share (20+ files) — MQTT first, sequential queue.
-   * Everyone in group/chat gets each file.
+   * FAST batch share:
+   * - If PeerJS peers online (same Wi‑Fi) → WebRTC big chunks (very fast)
+   * - Else → pipelined MQTT (always works for group)
+   * Groups stay subscribed anytime so receivers get files even on home screen.
    */
   async function sendFilesInRoom(files) {
     let list = files || [...state.pendingFiles];
@@ -918,14 +992,25 @@
       toast('Already sharing files… wait', 'ok');
       return;
     }
+
+    // Ensure MQTT group sub + Peer mesh before send
+    subscribeGroupTopic(state.room);
+    if (window.Peer && countOpenPeerConns() === 0) {
+      startPeerMeshBackground(state.name || loadName(), state.room);
+      await new Promise((r) => setTimeout(r, 800));
+    }
     if (!state.mqttReady) {
-      toast('Connecting… wait 2 sec then retry', 'err');
+      toast('Connecting…', 'ok');
       ensureMqtt();
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    if (!state.mqttReady) {
+      toast('Network not ready — retry', 'err');
       return;
     }
 
     if (list.length > MAX_BATCH_FILES) {
-      toast(`Max ${MAX_BATCH_FILES} files — first ${MAX_BATCH_FILES} send aagum`, 'ok');
+      toast(`Max ${MAX_BATCH_FILES} — first ${MAX_BATCH_FILES} send`, 'ok');
       list = list.slice(0, MAX_BATCH_FILES);
     }
 
@@ -934,144 +1019,145 @@
     const fromName = state.name || loadName() || 'Someone';
     let okCount = 0;
     let failCount = 0;
+    const fastPeer = countOpenPeerConns() >= 1;
+    const mode = fastPeer ? 'FAST (Wi‑Fi)' : 'CLOUD';
 
-    // Announce batch start to group
     await mqttPublishGroup({
       t: 'gfile-batch',
       count: total,
       fromId: getPresenceId(),
       fromName,
       room: state.room,
+      mode,
       ts: Date.now()
     });
-    addSystem(`Sharing ${total} file(s) to group…`);
-    setBatchUI(true, `0 / ${total} files`, 0);
-    toast(`${total} files share aagudhu…`, 'ok');
-
-    // Multi-file: skip PeerJS (faster + more stable on MQTT)
-    const usePeer = total <= 2 && state.conns.size > 0;
+    addSystem(`Sharing ${total} file(s) · ${mode}`);
+    setBatchUI(true, `0 / ${total} · ${mode}`, 0);
+    toast(`${total} files · ${mode}`, 'ok');
 
     for (let n = 0; n < list.length; n++) {
       const file = list[n];
-      const batchPct = (n / total) * 100;
-      setBatchUI(true, `File ${n + 1} / ${total} · ${file.name}`, batchPct);
-
+      setBatchUI(true, `${n + 1}/${total} · ${file.name}`, (n / total) * 100);
       if (file.size > MAX_FILE) {
-        toast(`${file.name} skipped (too large)`, 'err');
         failCount += 1;
+        toast(`${file.name} skipped (too large)`, 'err');
         continue;
       }
-
       try {
         const fid = 'f_' + Math.random().toString(36).slice(2, 8) + Date.now().toString(36);
         const mime = file.type || 'application/octet-stream';
-        const totalChunks = Math.ceil(file.size / MQTT_FILE_CHUNK) || 1;
-
         const localUrl = URL.createObjectURL(file);
         addChat({
-          name: fromName,
-          me: true,
-          mid: 'file_' + fid,
-          file: { url: localUrl, name: file.name, size: file.size },
-          status: 'sent'
-        });
-        showTransfer(fid, file.name, 0, `${n + 1}/${total} sharing…`);
-
-        await mqttPublishGroup({
-          t: 'gfile-meta',
-          fid,
-          name: file.name,
-          size: file.size,
-          mime,
-          fromId: getPresenceId(),
-          fromName,
-          room: state.room,
-          totalChunks,
-          batchIndex: n + 1,
-          batchTotal: total,
-          ts: Date.now()
+          name: fromName, me: true, mid: 'file_' + fid,
+          file: { url: localUrl, name: file.name, size: file.size }, status: 'sent'
         });
 
-        if (usePeer) {
-          for (const [tid, conn] of state.conns) {
-            if (tid === state.id) continue;
-            send(conn, {
-              t: 'file-meta', fid, name: file.name, size: file.size, mime,
-              fromName, fromId: getPresenceId()
-            });
-          }
+        const usePeerNow = countOpenPeerConns() >= 1;
+        if (usePeerNow) {
+          await sendOneFilePeerFast(file, fid, fromName, mime, n, total);
+        } else {
+          await sendOneFileMqttFast(file, fid, fromName, mime, n, total);
         }
-
-        const buf = new Uint8Array(await file.arrayBuffer());
-        let offset = 0;
-        let index = 0;
-        while (offset < buf.length) {
-          const slice = buf.subarray(offset, offset + MQTT_FILE_CHUNK);
-          const b64 = u8ToB64(slice);
-          await mqttPublishGroup({
-            t: 'gfile-chunk',
-            fid,
-            index,
-            chunk: b64,
-            room: state.room,
-            fromId: getPresenceId()
-          });
-          if (usePeer) {
-            for (const [tid, conn] of state.conns) {
-              if (tid === state.id) continue;
-              send(conn, { t: 'file-chunk', fid, chunk: b64 });
-            }
-          }
-          offset += slice.length;
-          index += 1;
-          const pct = (offset / buf.length) * 100;
-          showTransfer(fid, file.name, pct, `${n + 1}/${total} · ${fmtBytes(offset)}`);
-          // Slightly slower for big batches = more reliable
-          await new Promise((r) => setTimeout(r, total >= 10 ? 25 : 12));
-        }
-
-        await mqttPublishGroup({
-          t: 'gfile-end',
-          fid,
-          room: state.room,
-          fromId: getPresenceId(),
-          name: file.name,
-          size: file.size,
-          mime,
-          fromName,
-          batchIndex: n + 1,
-          batchTotal: total,
-          ts: Date.now()
-        });
-
-        if (usePeer) {
-          for (const [tid, conn] of state.conns) {
-            if (tid === state.id) continue;
-            send(conn, { t: 'file-end', fid });
-          }
-        }
-
-        showTransfer(fid, file.name, 100, `${n + 1}/${total} ✓`);
-        updateMsgTicks('file_' + fid, 'delivered');
         okCount += 1;
-        setTimeout(() => removeTransfer(fid), 2500);
-        // pause between files so receivers keep up
-        await new Promise((r) => setTimeout(r, total >= 10 ? 200 : 80));
+        updateMsgTicks('file_' + fid, 'delivered');
+        setTimeout(() => removeTransfer(fid), 2000);
       } catch (e) {
-        console.warn('batch file fail', e);
+        console.warn(e);
         failCount += 1;
         toast(`${file.name} failed`, 'err');
       }
     }
 
-    setBatchUI(true, `Done · ${okCount}/${total} sent` + (failCount ? ` · ${failCount} failed` : ''), 100);
-    addSystem(`Shared ${okCount}/${total} file(s) to group`);
-    toast(`${okCount} files group-ku send ✓`, 'ok');
-    setTimeout(() => setBatchUI(false), 4000);
-
+    setBatchUI(true, `Done · ${okCount}/${total}` + (failCount ? ` · ${failCount} fail` : ''), 100);
+    addSystem(`Shared ${okCount}/${total} · ${mode}`);
+    toast(`${okCount} files send ✓`, 'ok');
+    setTimeout(() => setBatchUI(false), 3500);
     state.pendingFiles = [];
     state.batchSending = false;
     renderQueue();
+  }
+
+  async function sendOneFilePeerFast(file, fid, fromName, mime, n, total) {
+    const targets = [...state.conns.entries()].filter(([id, c]) => id !== state.id && c?.open);
+    showTransfer(fid, file.name, 0, `${n + 1}/${total} FAST…`);
+    // Also notify group via MQTT meta+end so members without peer still get MQTT path if we dual-send small? 
+    // For max speed when peers exist: PeerJS only + MQTT announce for inbox toast
+    await mqttPublishGroup({
+      t: 'gfile-meta', fid, name: file.name, size: file.size, mime,
+      fromId: getPresenceId(), fromName, room: state.room,
+      totalChunks: Math.ceil(file.size / CHUNK) || 1,
+      batchIndex: n + 1, batchTotal: total, via: 'peer', ts: Date.now()
+    });
+
+    for (const [, conn] of targets) {
+      send(conn, {
+        t: 'file-meta', fid, name: file.name, size: file.size, mime,
+        fromName, fromId: getPresenceId()
+      });
+    }
+
+    const buf = new Uint8Array(await file.arrayBuffer());
+    let offset = 0;
+    while (offset < buf.length) {
+      const slice = buf.subarray(offset, offset + CHUNK);
+      const b64 = u8ToB64(slice);
+      for (const [, conn] of targets) {
+        send(conn, { t: 'file-chunk', fid, chunk: b64 });
+      }
+      // parallel MQTT pipeline for members not on PeerJS
+      mqttPublishGroup({
+        t: 'gfile-chunk', fid, index: Math.floor(offset / CHUNK),
+        chunk: b64, room: state.room, fromId: getPresenceId()
+      });
+      offset += slice.length;
+      showTransfer(fid, file.name, (offset / buf.length) * 100, `${n + 1}/${total} FAST ${fmtBytes(offset)}`);
+      await new Promise((r) => setTimeout(r, 0)); // yield only
+    }
+
+    for (const [, conn] of targets) send(conn, { t: 'file-end', fid });
+    await mqttPublishGroup({
+      t: 'gfile-end', fid, room: state.room, fromId: getPresenceId(),
+      name: file.name, size: file.size, mime, fromName,
+      batchIndex: n + 1, batchTotal: total, ts: Date.now()
+    });
+    showTransfer(fid, file.name, 100, `${n + 1}/${total} ✓ FAST`);
+  }
+
+  async function sendOneFileMqttFast(file, fid, fromName, mime, n, total) {
+    const totalChunks = Math.ceil(file.size / MQTT_FILE_CHUNK) || 1;
+    showTransfer(fid, file.name, 0, `${n + 1}/${total} uploading…`);
+    await mqttPublishGroup({
+      t: 'gfile-meta', fid, name: file.name, size: file.size, mime,
+      fromId: getPresenceId(), fromName, room: state.room, totalChunks,
+      batchIndex: n + 1, batchTotal: total, via: 'mqtt', ts: Date.now()
+    });
+
+    const buf = new Uint8Array(await file.arrayBuffer());
+    let offset = 0;
+    let index = 0;
+    const pending = [];
+    while (offset < buf.length) {
+      const slice = buf.subarray(offset, offset + MQTT_FILE_CHUNK);
+      const b64 = u8ToB64(slice);
+      pending.push(mqttPublishGroup({
+        t: 'gfile-chunk', fid, index, chunk: b64,
+        room: state.room, fromId: getPresenceId()
+      }));
+      offset += slice.length;
+      index += 1;
+      if (pending.length >= MQTT_PIPELINE) {
+        await Promise.all(pending.splice(0, MQTT_PIPELINE));
+      }
+      showTransfer(fid, file.name, (offset / buf.length) * 100, `${n + 1}/${total} · ${fmtBytes(offset)}`);
+    }
+    if (pending.length) await Promise.all(pending);
+
+    await mqttPublishGroup({
+      t: 'gfile-end', fid, room: state.room, fromId: getPresenceId(),
+      name: file.name, size: file.size, mime, fromName,
+      batchIndex: n + 1, batchTotal: total, ts: Date.now()
+    });
+    showTransfer(fid, file.name, 100, `${n + 1}/${total} ✓`);
   }
 
   function mqttPublishGroup(obj) {
@@ -1138,30 +1224,61 @@
     showTransfer(data.fid, rec.name, pct, `Receiving… ${fmtBytes(rec.received)}`);
   }
 
-  function handleGFileEnd(data) {
+  function handleGFileEnd(data, inThisChat = true) {
     if (!state.mqttIncoming) state.mqttIncoming = new Map();
     const rec = state.mqttIncoming.get(data.fid);
-    if (!rec) {
-      // end without meta — still try notify
-      return;
-    }
-    // assemble in order
+    if (!rec) return;
     const keys = Object.keys(rec.chunks).map(Number).sort((a, b) => a - b);
     const parts = keys.map((k) => rec.chunks[k]);
     const blob = new Blob(parts, { type: rec.mime });
     const url = URL.createObjectURL(blob);
+    const room = sanitizeRoom(data.room || state.room);
     showTransfer(data.fid, rec.name, 100, 'Ready ✓');
-    addChat({
-      name: rec.fromName,
-      me: false,
-      mid: 'file_' + data.fid,
-      file: { url, name: rec.name, size: rec.size || blob.size }
-    });
+
+    if (inThisChat && el.viewRoom?.classList.contains('active')) {
+      addChat({
+        name: rec.fromName,
+        me: false,
+        mid: 'file_' + data.fid,
+        file: { url, name: rec.name, size: rec.size || blob.size }
+      });
+    } else {
+      // Background: keep in inbox, group stays connected
+      state.fileInbox.push({
+        fid: data.fid,
+        name: rec.name,
+        size: rec.size || blob.size,
+        url,
+        fromName: rec.fromName,
+        room,
+        ts: Date.now()
+      });
+      if (state.fileInbox.length > 80) state.fileInbox = state.fileInbox.slice(-60);
+      renderGroupList();
+    }
     playMsgSound();
-    toast(`📁 ${rec.name} — tap to download`, 'ok');
+    toast(`📁 ${rec.name} ready — open group to download`, 'ok');
     try { navigator.vibrate?.(100); } catch {}
     state.mqttIncoming.delete(data.fid);
     setTimeout(() => removeTransfer(data.fid), 4000);
+  }
+
+  function flushInboxIntoChat(room) {
+    room = sanitizeRoom(room);
+    if (!room || !el.chatLog) return;
+    const keep = [];
+    for (const f of state.fileInbox) {
+      if (sanitizeRoom(f.room) === room) {
+        addChat({
+          name: f.fromName || 'Member',
+          me: false,
+          mid: 'file_' + f.fid,
+          file: { url: f.url, name: f.name, size: f.size }
+        });
+      } else keep.push(f);
+    }
+    state.fileInbox = keep;
+    renderGroupList();
   }
 
   async function sendFilesTo(targets) {
@@ -1656,7 +1773,7 @@
   }
 
   function leave() {
-    // User-initiated only — soft leave
+    // Leave chat UI only — GROUP MQTT stays subscribed (always connected)
     state.chatSessionOpen = false;
     if (state.peerRetryTimer) {
       clearTimeout(state.peerRetryTimer);
@@ -1669,6 +1786,7 @@
     state.groupName = '';
     state.chatPartnerName = '';
     publishPresence(true);
+    subscribeAllGroups(); // keep all groups live
     const u = new URL(location.href);
     u.searchParams.delete('room');
     u.searchParams.delete('group');
@@ -1679,7 +1797,7 @@
     showJoin();
     renderGroupList();
     renderHomeShareQr();
-    toast('Back to home');
+    toast('Home · groups still connected');
     updatePresenceHint();
   }
 
@@ -2212,13 +2330,15 @@
               if (uname) client.subscribe(PRESENCE_TOPIC + '/user/' + uname, { qos: 0 });
             } catch (e) { console.warn(e); }
 
-            // Announce + ask who is online
+            // Announce + ask who is online + keep ALL groups connected
             publishPresence(true);
             setTimeout(askWhoIsOnline, 300);
             setTimeout(publishPresence, 800);
+            setTimeout(subscribeAllGroups, 200);
             startPresenceLoop();
             updatePresenceHint();
             renderNearbyList();
+            renderGroupList();
             flushWaiters();
           };
 
@@ -2318,49 +2438,62 @@
       return;
     }
 
-    // Group chat + group FILES channel
-    if (data.room && state.room && String(state.room).toUpperCase() === String(data.room).toUpperCase()) {
-      if (data.t === 'gjoin' && data.fromId !== getPresenceId()) {
-        addSystem(`${data.fromName || 'Someone'} joined the group`);
-        return;
-      }
-      if (data.t === 'gchat' && data.fromId !== getPresenceId()) {
-        const d = addChat({
-          name: data.fromName || 'Member',
-          text: data.text,
-          me: false,
-          mid: data.mid
-        });
-        if (d && data.fromId) d.dataset.fromId = data.fromId;
-        sendDeliveryAck(data.mid, data.fromId, 'delivered');
-        if (document.visibilityState === 'visible') {
-          setTimeout(() => sendDeliveryAck(data.mid, data.fromId, 'seen'), 200);
-        }
-        return;
-      }
+    // Group channel — active chat OR always-subscribed groups
+    if (data.room) {
+      const roomCode = sanitizeRoom(data.room);
+      const inThisChat = state.room && sanitizeRoom(state.room) === roomCode;
+      const alwaysOn = roomCode && state.subscribedGroups.has(roomCode);
 
-      // ===== GROUP FILE SHARE (all members) =====
-      if (data.t === 'gfile-batch' && data.fromId !== getPresenceId()) {
-        addSystem(`${data.fromName || 'Someone'} is sharing ${data.count || '?'} file(s)…`);
-        toast(`${data.fromName}: ${data.count} files incoming`, 'ok');
-        return;
-      }
-      if (data.t === 'gfile-meta' && data.fromId !== getPresenceId()) {
-        handleGFileMeta(data);
-        return;
-      }
-      if (data.t === 'gfile-chunk' && data.fromId !== getPresenceId()) {
-        handleGFileChunk(data);
-        return;
-      }
-      if (data.t === 'gfile-end' && data.fromId !== getPresenceId()) {
-        handleGFileEnd(data);
-        return;
+      if (inThisChat || alwaysOn) {
+        if (data.t === 'gjoin' && data.fromId !== getPresenceId()) {
+          if (inThisChat) addSystem(`${data.fromName || 'Someone'} joined`);
+          return;
+        }
+        if (data.t === 'gpresence' && data.fromId !== getPresenceId()) {
+          return;
+        }
+        if (data.t === 'gchat' && data.fromId !== getPresenceId()) {
+          if (inThisChat) {
+            const d = addChat({
+              name: data.fromName || 'Member',
+              text: data.text,
+              me: false,
+              mid: data.mid
+            });
+            if (d && data.fromId) d.dataset.fromId = data.fromId;
+            sendDeliveryAck(data.mid, data.fromId, 'delivered');
+            if (document.visibilityState === 'visible') {
+              setTimeout(() => sendDeliveryAck(data.mid, data.fromId, 'seen'), 200);
+            }
+          } else {
+            toast(`${data.fromName} · ${String(data.text || '').slice(0, 40)}`, 'ok');
+            playMsgSound();
+          }
+          return;
+        }
+
+        if (data.t === 'gfile-batch' && data.fromId !== getPresenceId()) {
+          if (inThisChat) addSystem(`${data.fromName || 'Someone'} sharing ${data.count || '?'} file(s)…`);
+          toast(`${data.fromName}: ${data.count} files incoming`, 'ok');
+          return;
+        }
+        if (data.t === 'gfile-meta' && data.fromId !== getPresenceId()) {
+          handleGFileMeta(data);
+          return;
+        }
+        if (data.t === 'gfile-chunk' && data.fromId !== getPresenceId()) {
+          handleGFileChunk(data);
+          return;
+        }
+        if (data.t === 'gfile-end' && data.fromId !== getPresenceId()) {
+          handleGFileEnd(data, inThisChat);
+          return;
+        }
       }
     }
 
-    if ((data.t === 'gchat' || data.t === 'gjoin' || data.t === 'gfile-meta') && data.room) {
-      return; // already handled or not our room
+    if (data.t && String(data.t).startsWith('g') && data.room) {
+      return;
     }
 
     if (data.t === 'group-announce' && data.code) {
@@ -2868,10 +3001,13 @@
     showJoin();
     renderGroupList();
     setTimeout(() => {
-      ensureMqtt();
-      publishPresence(true);
-      startPresenceLoop();
-      updatePresenceHint();
+      ensureMqtt(() => {
+        subscribeAllGroups();
+        publishPresence(true);
+        startPresenceLoop();
+        updatePresenceHint();
+        renderGroupList();
+      });
     }, 200);
   } else {
     showRegister();
